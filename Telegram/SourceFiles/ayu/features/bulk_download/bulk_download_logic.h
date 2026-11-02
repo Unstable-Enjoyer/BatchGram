@@ -16,6 +16,8 @@
 #include <QString>
 
 #include <functional>
+#include <map>
+#include <set>
 #include <vector>
 
 namespace AyuBulkDownload {
@@ -87,7 +89,8 @@ struct Candidate {
 	uint64 groupId = 0; // 0 when not part of an album.
 	uint64 documentId = 0; // 0 when there is no document.
 	bool isVideo = false; // A normal video file (not GIF / round / image).
-	bool skip = false; // Already downloaded or downloading.
+	bool skip = false; // Already downloaded or downloading (videos only).
+	uint64 photoId = 0; // Non-zero when the message is a photo.
 };
 
 // Takes every video of every matched post (the message itself, or every
@@ -96,5 +99,90 @@ struct Candidate {
 [[nodiscard]] std::vector<int64> SelectVideos(
 	const std::vector<MatchedPost> &posts,
 	const std::vector<Candidate> &candidates);
+
+struct PhotoPick {
+	int64 msgId = 0; // The photo message.
+	int64 videoMsgId = 0; // First selected video of the same post.
+
+	friend inline bool operator==(PhotoPick, PhotoPick) = default;
+};
+
+struct MediaSelection {
+	std::vector<int64> videos; // Same as SelectVideos().
+	std::vector<PhotoPick> photos; // Sorted by msgId.
+};
+
+// SelectVideos() plus, when includePhotos is set, every photo of each
+// matched post that has at least one selected video, paired with the
+// first (lowest id) selected video of that post. Photos are deduplicated
+// by message and by photoId.
+[[nodiscard]] MediaSelection SelectMedia(
+	const std::vector<MatchedPost> &posts,
+	const std::vector<Candidate> &candidates,
+	bool includePhotos);
+
+// Splits "/d/name.ext" into { "/d/name", ".ext" }. A file name without
+// a dot (or starting with its only dot) gives an empty extension.
+struct PathParts {
+	QString base;
+	QString extension;
+};
+[[nodiscard]] PathParts SplitPath(const QString &path);
+
+// The photo path for a video saved to videoPath: the same folder and
+// base name, with photoExtension (including the dot, e.g. ".jpg").
+// "/d/Episode 12.mp4" -> "/d/Episode 12.jpg".
+[[nodiscard]] QString PhotoPathForVideo(
+	const QString &videoPath,
+	const QString &photoExtension);
+
+// Names picked during one download batch. A file may be created only when
+// its download finishes, so `exists` alone can't tell that a name is taken.
+// `next` keeps the " (N)" search for a name from restarting at 0.
+struct NameReservation {
+	std::set<QString> taken;
+	std::map<QString, int> next;
+};
+
+// Returns base + extension, or base + " (N)" + extension with the lowest
+// N >= 2 that is neither reserved nor existing, and reserves it.
+[[nodiscard]] QString ReserveName(
+	NameReservation &reservation,
+	const QString &base,
+	const QString &extension,
+	const std::function<bool(const QString&)> &exists);
+
+// The folder a batch downloads to, ending with '/', or empty if none.
+// A non-empty folderOverride (picked for this batch) wins. Otherwise the
+// download path setting is resolved as upstream does: empty means
+// defaultFolder, tmpMarker (FileDialog::Tmp()) means tempFolder,
+// anything else is the folder itself.
+[[nodiscard]] QString ResolveDownloadFolder(
+	const QString &folderOverride,
+	const QString &setting,
+	const QString &tmpMarker,
+	const QString &defaultFolder,
+	const QString &tempFolder);
+
+struct SearchProgress {
+	int scanned = 0; // Search results received so far.
+	int total = 0; // The server `count`, 0 while unknown.
+	int videos = 0; // Videos selected so far.
+	int photos = 0; // Photos selected so far.
+
+	friend inline bool operator==(
+		const SearchProgress &,
+		const SearchProgress &) = default;
+};
+
+// The total to show next to `scanned`: never less than scanned.
+[[nodiscard]] int ProgressTotal(const SearchProgress &progress);
+
+// Progress in [0, 1] for the bar: scanned / ProgressTotal().
+[[nodiscard]] float64 ProgressRatio(const SearchProgress &progress);
+
+// A search page failed: the result is partial (and still shown) when
+// anything was scanned before the failure.
+[[nodiscard]] bool IsPartialResult(bool failed, int scanned);
 
 } // namespace AyuBulkDownload

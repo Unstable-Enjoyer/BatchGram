@@ -6,6 +6,7 @@
 // Copyright @Radolyn, 2026
 #include "ayu/features/bulk_download/bulk_download.h"
 
+#include "ayu/ui/boxes/download_videos_box.h"
 #include "base/base_file_utilities.h"
 #include "core/application.h"
 #include "core/core_settings.h"
@@ -16,18 +17,81 @@
 #include "data/data_download_manager.h"
 #include "data/data_file_origin.h"
 #include "data/data_media_types.h"
+#include "data/data_photo.h"
+#include "data/data_photo_media.h"
 #include "data/data_session.h"
 #include "history/history_item.h"
 #include "main/main_session.h"
 #include "storage/storage_account.h"
 
 #include <map>
-#include <set>
 
 namespace AyuBulkDownload {
 namespace {
 
 using MessagesList = QVector<MTPMessage>;
+
+// Photos load into memory first (as in upstream "Save selected files"),
+// then are written to their reserved path and added to the Downloads.
+class PhotoSaver final {
+public:
+	explicit PhotoSaver(not_null<Main::Session*> session);
+
+	void add(
+		FullMsgId itemId,
+		not_null<PhotoData*> photo,
+		const QString &path);
+
+private:
+	struct Pending {
+		FullMsgId itemId;
+		not_null<PhotoData*> photo;
+		std::shared_ptr<Data::PhotoMedia> view;
+		QString path;
+	};
+
+	void check();
+	[[nodiscard]] bool done(const Pending &pending) const;
+
+	const not_null<Main::Session*> _session;
+	std::vector<Pending> _pending;
+	rpl::lifetime _subscription;
+
+};
+
+struct AccountData {
+	std::unique_ptr<VideoSearch> search;
+	std::unique_ptr<PhotoSaver> photos;
+};
+
+[[nodiscard]] auto Accounts()
+-> std::map<not_null<Main::Session*>, AccountData> & {
+	static auto result = std::map<not_null<Main::Session*>, AccountData>();
+	return result;
+}
+
+[[nodiscard]] AccountData &Account(not_null<Main::Session*> session) {
+	auto &accounts = Accounts();
+	const auto i = accounts.find(session);
+	if (i != accounts.end()) {
+		return i->second;
+	}
+	// Logout or session destruction cancels the search and photo saves.
+	session->lifetime().add([=] {
+		auto taken = base::take(Accounts()[session]);
+		Accounts().erase(session);
+	});
+	return accounts[session];
+}
+
+void DestroySearch(not_null<Main::Session*> session) {
+	auto &accounts = Accounts();
+	const auto i = accounts.find(session);
+	if (i != accounts.end()) {
+		// Take it out first, so Find() is empty during destruction.
+		auto taken = base::take(i->second.search);
+	}
+}
 
 [[nodiscard]] const MessagesList *MessagesFrom(
 		const MTPmessages_Messages &result) {
@@ -38,45 +102,47 @@ using MessagesList = QVector<MTPMessage>;
 	});
 }
 
+// The `count` field of the result, or the list size when it has none.
+[[nodiscard]] int TotalFrom(const MTPmessages_Messages &result) {
+	return result.match([](const MTPDmessages_messagesNotModified &) {
+		return 0;
+	}, [](const MTPDmessages_messages &data) {
+		return int(data.vmessages().v.size());
+	}, [](const MTPDmessages_messagesSlice &data) {
+		return data.vcount().v;
+	}, [](const MTPDmessages_channelMessages &data) {
+		return data.vcount().v;
+	});
+}
+
 [[nodiscard]] DocumentData *VideoOf(not_null<HistoryItem*> item) {
 	const auto media = item->media();
 	const auto document = media ? media->document() : nullptr;
 	return (document && document->isVideoFile()) ? document : nullptr;
 }
 
-[[nodiscard]] bool AlreadyHave(not_null<DocumentData*> document) {
-	return document->loading() || !document->filepath(true).isEmpty();
+[[nodiscard]] PhotoData *PhotoOf(not_null<HistoryItem*> item) {
+	const auto media = item->media();
+	return media ? media->photo() : nullptr;
 }
 
-// Paths picked during one StartDownloads() batch. A file may be created
-// only when its download finishes, so `exists()` alone can't tell that
-// a name is taken. `next` keeps the " (N)" search from restarting at 0.
-struct Reservation {
-	std::set<QString> taken;
-	std::map<QString, int> next;
-};
+// Unsavable videos (forbidsFileSave) are skipped silently.
+[[nodiscard]] bool SkipVideo(not_null<DocumentData*> document) {
+	return document->loading()
+		|| !document->filepath(true).isEmpty()
+		|| document->forbidsFileSave();
+}
 
-// Same target as FileNameUnsafe() picks when it does not ask:
-// the default download folder, the document name (or a timestamped
-// "video_..." name) and a " (N)" suffix when the name is taken.
-[[nodiscard]] QString DefaultDownloadFilePath(
+[[nodiscard]] bool FileExists(const QString &path) {
+	return QFileInfo::exists(path);
+}
+
+// Same name as FileNameUnsafe() picks when it does not ask: the document
+// name (or a timestamped "video_..." name), reserved for this batch.
+[[nodiscard]] QString VideoFilePath(
 		not_null<DocumentData*> document,
-		Reservation &reservation) {
-	const auto session = &document->session();
-	const auto setting = Core::App().settings().downloadPath();
-	auto folder = setting.isEmpty()
-		? File::DefaultDownloadPath(session)
-		: (setting == FileDialog::Tmp())
-		? session->local().tempDirectory()
-		: setting;
-	if (folder.isEmpty()) {
-		return QString();
-	} else if (!folder.endsWith('/')) {
-		folder += '/';
-	}
-	if (!QDir().exists(folder)) {
-		QDir().mkpath(folder);
-	}
+		const QString &folder,
+		NameReservation &reservation) {
 	auto name = base::FileNameFromUserString(document->filename());
 	if (name.isEmpty() || name.at(0) == QChar::fromLatin1('.')) {
 		const auto patterns = Core::MimeTypeForName(
@@ -89,21 +155,12 @@ struct Reservation {
 		// skipExistance: only the timestamped file name, checked below.
 		name = filedialogDefaultName(u"video"_q, extension, folder, true);
 	}
-	const auto dot = name.lastIndexOf('.');
-	const auto base = folder + ((dot >= 0) ? name.mid(0, dot) : name);
-	const auto extension = (dot >= 0) ? name.mid(dot) : QString();
-	const auto make = [&](int index) {
-		return index
-			? (base + u" (%1)"_q.arg(index + 1) + extension)
-			: (base + extension);
-	};
-	auto index = reservation.next[base + extension];
-	auto result = make(index);
-	while (reservation.taken.contains(result) || QFileInfo::exists(result)) {
-		result = make(++index);
-	}
-	reservation.next[base + extension] = index + 1;
-	reservation.taken.insert(result);
+	const auto parts = SplitPath(folder + name);
+	auto result = ReserveName(
+		reservation,
+		parts.base,
+		parts.extension,
+		FileExists);
 #ifdef Q_OS_WIN
 	// Same masking as FileNameForSave().
 	const auto lower = result.trimmed().toLower();
@@ -117,20 +174,19 @@ struct Reservation {
 }
 
 // What DocumentSaveClickHandler::SaveAndTrack() does, with an explicit
-// path: it never asks for a path (with "Ask download path" on it would
-// open a dialog per file) and never takes Save()'s cache-only branch for
-// saveToCache() documents, so every started download goes to a file and
-// is tracked in the Downloads manager.
-void SaveToDefaultFolderAndTrack(
+// path: it never asks for a path and never takes Save()'s cache-only
+// branch for saveToCache() documents. Returns the path used, or empty.
+QString SaveVideoAndTrack(
 		FullMsgId itemId,
 		not_null<DocumentData*> document,
-		Reservation &reservation) {
+		const QString &folder,
+		NameReservation &reservation) {
 	if (document->isNull() || document->forbidsFileSave()) {
-		return;
+		return QString();
 	}
-	const auto path = DefaultDownloadFilePath(document, reservation);
+	const auto path = VideoFilePath(document, folder, reservation);
 	if (path.isEmpty()) {
-		return;
+		return QString();
 	}
 	document->save(Data::FileOrigin(itemId), path);
 	if (document->loading() && !document->loadingFilePath().isEmpty()) {
@@ -141,24 +197,179 @@ void SaveToDefaultFolderAndTrack(
 			});
 		}
 	}
+	return path;
+}
+
+PhotoSaver::PhotoSaver(not_null<Main::Session*> session)
+: _session(session) {
+}
+
+void PhotoSaver::add(
+		FullMsgId itemId,
+		not_null<PhotoData*> photo,
+		const QString &path) {
+	auto view = photo->createMediaView();
+	view->wanted(Data::PhotoSize::Large, Data::FileOrigin(itemId));
+	_pending.push_back({
+		.itemId = itemId,
+		.photo = photo,
+		.view = std::move(view),
+		.path = path,
+	});
+	if (!_subscription) {
+		_session->downloaderTaskFinished(
+		) | rpl::on_next([=] {
+			check();
+		}, _subscription);
+	}
+	check();
+}
+
+bool PhotoSaver::done(const Pending &pending) const {
+	if (!pending.view->loaded()) {
+		// Still loading, or failed to load: drop it when it failed.
+		return pending.photo->failed(Data::PhotoSize::Large);
+	} else if (!pending.view->saveToFile(pending.path)) {
+		return true;
+	}
+	if (const auto item = _session->data().message(pending.itemId)) {
+		auto &manager = Core::App().downloadManager();
+		manager.addLoaded({
+			.item = item,
+			.photo = pending.photo,
+		}, pending.path, manager.computeNextStartDate());
+	}
+	return true;
+}
+
+void PhotoSaver::check() {
+	_pending.erase(
+		ranges::remove_if(_pending, [&](const Pending &pending) {
+			return done(pending);
+		}),
+		end(_pending));
+	if (_pending.empty()) {
+		_subscription.destroy();
+	}
 }
 
 } // namespace
 
+QString DefaultDownloadFolder(not_null<Main::Session*> session) {
+	return ResolveDownloadFolder(
+		QString(),
+		Core::App().settings().downloadPath(),
+		FileDialog::Tmp(),
+		File::DefaultDownloadPath(session),
+		session->local().tempDirectory());
+}
+
+void StartDownloads(
+		not_null<Main::Session*> session,
+		const SearchOutcome &outcome,
+		const QString &folder) {
+	const auto target = ResolveDownloadFolder(
+		folder,
+		Core::App().settings().downloadPath(),
+		FileDialog::Tmp(),
+		File::DefaultDownloadPath(session),
+		session->local().tempDirectory());
+	if (target.isEmpty()) {
+		return;
+	}
+	if (!QDir().exists(target)) {
+		QDir().mkpath(target);
+	}
+	auto reservation = NameReservation();
+	auto videoPaths = std::map<FullMsgId, QString>();
+	for (const auto &id : outcome.videos) {
+		const auto item = session->data().message(id);
+		const auto video = item ? VideoOf(item) : nullptr;
+		if (!video || video->loading()) {
+			continue;
+		}
+		const auto path = SaveVideoAndTrack(id, video, target, reservation);
+		if (!path.isEmpty()) {
+			videoPaths.emplace(id, path);
+		}
+	}
+	if (outcome.photos.empty()) {
+		return;
+	}
+	auto &saver = Account(session).photos;
+	if (!saver) {
+		saver = std::make_unique<PhotoSaver>(session);
+	}
+	for (const auto &[photoId, videoId] : outcome.photos) {
+		const auto i = videoPaths.find(videoId);
+		const auto item = session->data().message(photoId);
+		const auto photo = item ? PhotoOf(item) : nullptr;
+		if (i == videoPaths.end() || !photo) {
+			continue;
+		}
+		const auto parts = SplitPath(
+			PhotoPathForVideo(i->second, u".jpg"_q));
+		saver->add(
+			photoId,
+			photo,
+			ReserveName(
+				reservation,
+				parts.base,
+				parts.extension,
+				FileExists));
+	}
+}
+
 VideoSearch::VideoSearch(
 	not_null<ChannelData*> channel,
 	Query query,
-	Fn<void(SearchResult)> done,
-	Fn<void()> fail)
+	bool includePhotos)
 : _channel(channel)
 , _query(std::move(query))
-, _done(std::move(done))
-, _fail(std::move(fail))
+, _includePhotos(includePhotos)
 , _api(&channel->session().mtp()) {
 }
 
-void VideoSearch::start() {
-	requestPage();
+VideoSearch::~VideoSearch() = default;
+
+VideoSearch *VideoSearch::Find(not_null<Main::Session*> session) {
+	const auto &accounts = Accounts();
+	const auto i = accounts.find(session);
+	return (i != accounts.end()) ? i->second.search.get() : nullptr;
+}
+
+not_null<VideoSearch*> VideoSearch::Start(
+		not_null<ChannelData*> channel,
+		Query query,
+		bool includePhotos) {
+	const auto session = &channel->session();
+	if (const auto running = Find(session)) {
+		return running;
+	}
+	auto &data = Account(session);
+	data.search = std::make_unique<VideoSearch>(
+		channel,
+		std::move(query),
+		includePhotos);
+	const auto result = data.search.get();
+	result->requestPage();
+	return result;
+}
+
+void VideoSearch::stop() {
+	DestroySearch(&_channel->session());
+}
+
+not_null<ChannelData*> VideoSearch::channel() const {
+	return _channel;
+}
+
+rpl::producer<SearchProgress> VideoSearch::progressValue() const {
+	return _progress.value();
+}
+
+rpl::lifetime &VideoSearch::lifetime() {
+	return _lifetime;
 }
 
 void VideoSearch::requestPage() {
@@ -183,8 +394,14 @@ void VideoSearch::requestPage() {
 	)).done([=](const MTPmessages_Messages &result) {
 		pageReceived(result);
 	}).fail([=] {
-		_fail();
+		pageFailed();
 	}).send();
+}
+
+void VideoSearch::pageFailed() {
+	// Keep what was collected so far.
+	_failed = true;
+	requestAlbums();
 }
 
 void VideoSearch::pageReceived(const MTPmessages_Messages &result) {
@@ -215,6 +432,12 @@ void VideoSearch::pageReceived(const MTPmessages_Messages &result) {
 			});
 		}
 	}
+	auto progress = _progress.current();
+	progress.scanned += received;
+	progress.total = std::max(progress.total, TotalFrom(result));
+	_progress = progress;
+	updateProgress();
+
 	const auto complete = !list
 		|| (result.type() == mtpc_messages_messages)
 		|| !received
@@ -224,7 +447,10 @@ void VideoSearch::pageReceived(const MTPmessages_Messages &result) {
 		requestPage();
 		return;
 	}
+	requestAlbums();
+}
 
+void VideoSearch::requestAlbums() {
 	_chunks = ChunkIds(AlbumNeighborIds(albums(), [&](int64 id) {
 		return lookup(id) != nullptr;
 	}));
@@ -246,6 +472,7 @@ void VideoSearch::requestNextChunk() {
 		MTP_vector<MTPInputMessage>(ids)
 	)).done([=](const MTPmessages_Messages &result) {
 		_channel->owner().processExistingMessages(_channel, result);
+		updateProgress();
 		requestNextChunk();
 	}).fail([=] {
 		// A failed chunk only means fewer album items, keep going.
@@ -253,25 +480,27 @@ void VideoSearch::requestNextChunk() {
 	}).send();
 }
 
-void VideoSearch::finish() {
-	// `allowed` also skips videos that can't be saved, `any` does not,
-	// to tell "nothing found" from "found, but saving is restricted".
-	auto allowed = std::vector<Candidate>();
-	auto any = std::vector<Candidate>();
+void VideoSearch::updateProgress() {
+	const auto selection = select();
+	auto progress = _progress.current();
+	progress.videos = int(selection.videos.size());
+	progress.photos = int(selection.photos.size());
+	_progress = progress;
+}
+
+MediaSelection VideoSearch::select() const {
+	auto candidates = std::vector<Candidate>();
 	const auto add = [&](not_null<HistoryItem*> item) {
 		const auto video = VideoOf(item);
-		const auto candidate = Candidate{
+		const auto photo = video ? nullptr : PhotoOf(item);
+		candidates.push_back({
 			.msgId = item->id.bare,
 			.groupId = item->groupId().value,
 			.documentId = video ? uint64(video->id) : uint64(0),
 			.isVideo = (video != nullptr),
-			.skip = video && AlreadyHave(video),
-		};
-		any.push_back(candidate);
-		allowed.push_back(candidate);
-		if (video && video->forbidsFileSave()) {
-			allowed.back().skip = true;
-		}
+			.skip = video && SkipVideo(video),
+			.photoId = photo ? uint64(photo->id) : uint64(0),
+		});
 	};
 	for (const auto &post : _posts) {
 		if (!post.groupId) {
@@ -288,13 +517,53 @@ void VideoSearch::finish() {
 			}
 		}
 	}
-	auto result = SearchResult();
-	for (const auto id : SelectVideos(_posts, allowed)) {
-		result.ids.push_back(FullMsgId(_channel->id, MsgId(id)));
+	return SelectMedia(_posts, candidates, _includePhotos);
+}
+
+void VideoSearch::finish() {
+	if (_finished) {
+		return;
 	}
-	result.restricted = result.ids.empty()
-		&& !SelectVideos(_posts, any).empty();
-	_done(std::move(result));
+	_finished = true;
+
+	const auto selection = select();
+	const auto peerId = _channel->id;
+	auto outcome = SearchOutcome{
+		.channel = _channel,
+		.partial = IsPartialResult(_failed, _progress.current().scanned),
+		.failed = _failed && !_progress.current().scanned,
+	};
+	for (const auto id : selection.videos) {
+		const auto itemId = FullMsgId(peerId, MsgId(id));
+		outcome.videos.push_back(itemId);
+		if (const auto item = lookup(id)) {
+			if (const auto video = VideoOf(item)) {
+				outcome.size += video->size;
+			}
+		}
+	}
+	for (const auto &pick : selection.photos) {
+		outcome.photos.push_back({
+			.photo = FullMsgId(peerId, MsgId(pick.msgId)),
+			.video = FullMsgId(peerId, MsgId(pick.videoMsgId)),
+		});
+		if (const auto item = lookup(pick.msgId)) {
+			if (const auto photo = PhotoOf(item)) {
+				// Unknown sizes (0) are left out of the total.
+				outcome.size += std::max(
+					photo->imageByteSize(Data::PhotoSize::Large),
+					0);
+			}
+		}
+	}
+
+	const auto session = &_channel->session();
+	ShowDownloadVideosResult(session, std::move(outcome));
+
+	// We're inside an MTP handler of our own sender, destroy later.
+	crl::on_main(this, [=] {
+		DestroySearch(session);
+	});
 }
 
 HistoryItem *VideoSearch::lookup(int64 id) const {
@@ -314,20 +583,6 @@ std::vector<std::vector<int64>> VideoSearch::albums() const {
 		result.push_back(std::move(members));
 	}
 	return result;
-}
-
-void StartDownloads(
-		not_null<Main::Session*> session,
-		const std::vector<FullMsgId> &ids) {
-	auto reservation = Reservation();
-	for (const auto &id : ids) {
-		const auto item = session->data().message(id);
-		const auto video = item ? VideoOf(item) : nullptr;
-		if (!video || video->loading()) {
-			continue;
-		}
-		SaveToDefaultFolderAndTrack(id, video, reservation);
-	}
 }
 
 } // namespace AyuBulkDownload

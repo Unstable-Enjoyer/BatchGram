@@ -7,28 +7,36 @@
 #include "ayu/ui/boxes/download_videos_box.h"
 
 #include "ayu/features/bulk_download/bulk_download.h"
+#include "core/file_utilities.h"
 #include "data/data_channel.h"
 #include "lang/lang_keys.h"
+#include "lang/lang_tag.h"
 #include "main/main_session.h"
 #include "ui/boxes/calendar_box.h"
 #include "ui/boxes/confirm_box.h"
 #include "ui/layers/generic_box.h"
 #include "ui/layers/show.h"
+#include "ui/text/format_values.h"
+#include "ui/qt_object_factory.h"
+#include "ui/widgets/checkbox.h"
+#include "ui/widgets/continuous_sliders.h"
 #include "ui/widgets/fields/input_field.h"
 #include "ui/widgets/labels.h"
 #include "ui/wrap/vertical_layout.h"
+#include "window/window_session_controller.h"
 #include "styles/style_boxes.h"
 #include "styles/style_export.h"
 #include "styles/style_layers.h"
+#include "styles/style_media_player.h"
 #include "styles/style_widgets.h"
+
+using namespace AyuBulkDownload;
 
 namespace {
 
-struct State {
+struct FilterState {
 	rpl::variable<QDate> from;
 	rpl::variable<QDate> till;
-	std::unique_ptr<AyuBulkDownload::VideoSearch> search;
-	bool searching = false;
 };
 
 // Same as Export::View::SettingsWidget::editDateLimit, with dates.
@@ -92,12 +100,159 @@ void EditDateLimit(
 	}) | rpl::flatten_latest();
 }
 
+[[nodiscard]] QString CountVideos(int count) {
+	return tr::ayu_DownloadVideosCount(tr::now, lt_count_decimal, count);
+}
+
+[[nodiscard]] QString CountPhotos(int count) {
+	return tr::ayu_DownloadPhotosCount(tr::now, lt_count_decimal, count);
+}
+
+[[nodiscard]] QString ProgressInfo(const SearchProgress &progress) {
+	if (!progress.scanned && !progress.total) {
+		return QString();
+	}
+	return tr::ayu_DownloadVideosProgress(
+		tr::now,
+		lt_count_decimal,
+		ProgressTotal(progress),
+		lt_scanned,
+		Lang::FormatCountDecimal(progress.scanned),
+		lt_videos,
+		CountVideos(progress.videos));
+}
+
+[[nodiscard]] QString ConfirmText(const SearchOutcome &outcome) {
+	const auto items = outcome.photos.empty()
+		? CountVideos(int(outcome.videos.size()))
+		: tr::ayu_DownloadVideosAndPhotos(
+			tr::now,
+			lt_videos,
+			CountVideos(int(outcome.videos.size())),
+			lt_photos,
+			CountPhotos(int(outcome.photos.size())));
+	const auto question = tr::ayu_DownloadVideosConfirm(
+		tr::now,
+		lt_items,
+		items,
+		lt_size,
+		Ui::FormatSizeText(outcome.size));
+	return outcome.partial
+		? (tr::ayu_DownloadVideosStoppedEarly(tr::now) + u"\n\n"_q + question)
+		: question;
+}
+
+// Same confirmation as Export::View::PanelController::stopWithConfirmation.
+void StopWithConfirmation(
+		not_null<Ui::GenericBox*> box,
+		not_null<Main::Session*> session) {
+	box->uiShow()->showBox(Ui::MakeConfirmBox({
+		.text = tr::ayu_DownloadVideosSureStop(),
+		.confirmed = [=](Fn<void()> &&close) {
+			if (const auto search = VideoSearch::Find(session)) {
+				search->stop();
+			}
+			close();
+		},
+		.confirmText = tr::lng_export_stop(),
+		.confirmStyle = &st::attentionBoxButton,
+	}));
+}
+
+// Modeled on Ui::ConfirmBox (same label style and padding), with an
+// extra line for the destination folder like the location label of the
+// Export chat history settings, and a link to change it for this batch.
+void ResultBox(
+		not_null<Ui::GenericBox*> box,
+		not_null<Main::Session*> session,
+		SearchOutcome outcome) {
+	const auto folder = box->lifetime().make_state<QString>(
+		DefaultDownloadFolder(session));
+	const auto picked = box->lifetime().make_state<QString>();
+
+	box->addRow(
+		object_ptr<Ui::FlatLabel>(
+			box,
+			ConfirmText(outcome),
+			st::boxLabel),
+		st::boxPadding);
+
+	const auto location = box->addRow(
+		object_ptr<Ui::FlatLabel>(box, st::exportLocationLabel),
+		style::margins(
+			st::boxPadding.left(),
+			0,
+			st::boxPadding.right(),
+			st::boxPadding.bottom()));
+	const auto refresh = [=] {
+		const auto change = tr::ayu_DownloadVideosChangeFolder(tr::now);
+		const auto prefix = tr::ayu_DownloadVideosFolder(
+			tr::now,
+			lt_path,
+			QString());
+		const auto &font = st::exportLocationLabel.style.font;
+		// Elide the path natively, as DownloadPathBox::setPathText does.
+		const auto available = st::boxWidth
+			- st::boxPadding.left()
+			- st::boxPadding.right()
+			- font->width(prefix)
+			- font->spacew
+			- font->width(change);
+		const auto path = font->elided(
+			QDir::toNativeSeparators(*folder),
+			std::max(available, 0));
+		location->setMarkedText(tr::ayu_DownloadVideosFolder(
+			tr::now,
+			lt_path,
+			TextWithEntities{ path },
+			tr::marked
+		).append(' ').append(tr::link(change, u"internal:change"_q)));
+	};
+	refresh();
+	location->overrideLinkClickHandler([=](const QString &url) {
+		const auto initial = folder->endsWith('/')
+			? folder->left(folder->size() - 1)
+			: *folder;
+		const auto handleFolder = [=](const QString &result) {
+			if (result.isEmpty()) {
+				return;
+			}
+			*picked = result.endsWith('/') ? result : (result + '/');
+			*folder = *picked;
+			refresh();
+		};
+		FileDialog::GetFolder(
+			box.get(),
+			tr::lng_download_path_choose(tr::now),
+			initial,
+			crl::guard(box, handleFolder));
+	});
+
+	box->addButton(tr::lng_media_download(), [=] {
+		// The picked folder applies to this batch only.
+		StartDownloads(session, outcome, *picked);
+		box->closeBox();
+	});
+	box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
+}
+
 } // namespace
+
+void ShowDownloadVideos(
+		not_null<Window::SessionController*> controller,
+		not_null<ChannelData*> channel) {
+	const auto session = &channel->session();
+	if (VideoSearch::Find(session)) {
+		controller->show(Box(DownloadVideosProgressBox, session));
+	} else {
+		controller->show(Box(DownloadVideosBox, channel));
+	}
+}
 
 void DownloadVideosBox(
 		not_null<Ui::GenericBox*> box,
 		not_null<ChannelData*> channel) {
-	const auto state = box->lifetime().make_state<State>();
+	const auto state = box->lifetime().make_state<FilterState>();
 	const auto content = box->verticalLayout();
 
 	box->setTitle(tr::ayu_DownloadVideosTitle());
@@ -141,7 +296,6 @@ void DownloadVideosBox(
 			std::move(datesText),
 			st::boxLabel),
 		st::exportLimitsPadding);
-	box->addSkip(st::boxLittleSkip);
 	label->overrideLinkClickHandler([=](const QString &url) {
 		if (url == u"internal:edit_from"_q) {
 			EditDateLimit(
@@ -162,58 +316,30 @@ void DownloadVideosBox(
 		}
 	});
 
-	const auto found = [=](AyuBulkDownload::SearchResult result) {
-		state->searching = false;
-		box->showLoading(false);
-		const auto ids = std::move(result.ids);
-		if (ids.empty()) {
-			box->uiShow()->showBox(Ui::MakeInformBox(result.restricted
-				? (channel->isMegagroup()
-					? tr::lng_error_nocopy_group()
-					: tr::lng_error_nocopy_channel())
-				: tr::ayu_DownloadVideosNotFound()));
-			return;
-		}
-		const auto weak = base::make_weak(box);
-		const auto session = &channel->session();
-		box->uiShow()->showBox(Ui::MakeConfirmBox({
-			.text = tr::ayu_DownloadVideosConfirm(
-				tr::now,
-				lt_count,
-				int(ids.size())),
-			.confirmed = [=](Fn<void()> &&close) {
-				AyuBulkDownload::StartDownloads(session, ids);
-				close();
-				if (const auto strong = weak.get()) {
-					strong->closeBox();
-				}
-			},
-			.confirmText = tr::lng_media_download(),
-			.cancelText = tr::lng_cancel(),
-		}));
-	};
-	const auto failed = [=] {
-		state->searching = false;
-		box->showLoading(false);
-		box->uiShow()->showToast(tr::ayu_DownloadVideosFailed(tr::now));
-	};
+	// Same as the options of the Export chat history settings.
+	const auto includePhotos = content->add(
+		object_ptr<Ui::Checkbox>(
+			content,
+			tr::ayu_DownloadVideosIncludePhotos(tr::now),
+			false,
+			st::defaultBoxCheckbox),
+		st::exportSettingPadding);
 
 	const auto submit = [=] {
-		if (state->searching) {
-			return;
+		const auto session = &channel->session();
+		if (!VideoSearch::Find(session)) {
+			VideoSearch::Start(
+				channel,
+				PrepareQuery(
+					phrase->getLastText(),
+					hashtag->getLastText(),
+					state->from.current(),
+					state->till.current()),
+				includePhotos->checked());
 		}
-		state->searching = true;
-		box->showLoading(true);
-		state->search = std::make_unique<AyuBulkDownload::VideoSearch>(
-			channel,
-			AyuBulkDownload::PrepareQuery(
-				phrase->getLastText(),
-				hashtag->getLastText(),
-				state->from.current(),
-				state->till.current()),
-			crl::guard(box, found),
-			crl::guard(box, failed));
-		state->search->start();
+		box->uiShow()->showBox(
+			Box(DownloadVideosProgressBox, session),
+			Ui::LayerOption::CloseOther);
 	};
 
 	phrase->submits(
@@ -223,17 +349,98 @@ void DownloadVideosBox(
 	hashtag->submits(
 	) | rpl::on_next(submit, hashtag->lifetime());
 
-	// The box stays alive during its hide animation, so make sure late
-	// results don't open anything after it was closed.
-	box->boxClosing() | rpl::on_next([=] {
-		state->search = nullptr;
-		state->searching = false;
-	}, box->lifetime());
-
 	box->setFocusCallback([=] {
 		phrase->setFocusFast();
 	});
 
 	box->addButton(tr::ayu_DownloadVideosSearch(), submit);
 	box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
+}
+
+void DownloadVideosProgressBox(
+		not_null<Ui::GenericBox*> box,
+		not_null<Main::Session*> session) {
+	box->setTitle(tr::ayu_DownloadVideosTitle());
+	box->setWidth(st::boxWidth);
+
+	const auto search = VideoSearch::Find(session);
+	if (!search) {
+		return;
+	}
+	// The search lives in the account: hiding the box keeps it running,
+	// and the box closes when the search finishes or is stopped.
+	search->lifetime().add(crl::guard(box, [=] {
+		box->closeBox();
+	}));
+
+	// Same layout as Export::View::ProgressWidget::Row: a bold label on
+	// the left, the info on the right, the progress line below.
+	const auto row = box->addRow(
+		object_ptr<Ui::RpWidget>(box),
+		st::exportProgressRowPadding);
+	row->resize(row->width(), st::exportProgressRowHeight);
+	const auto label = Ui::CreateChild<Ui::FlatLabel>(
+		row,
+		search->channel()->name(),
+		st::exportProgressLabel);
+	const auto info = Ui::CreateChild<Ui::FlatLabel>(
+		row,
+		search->progressValue() | rpl::map(ProgressInfo),
+		st::exportProgressInfoLabel);
+	const auto line = Ui::CreateChild<Ui::FilledSlider>(
+		row,
+		st::mediaPlayerPlayback);
+	line->setAttribute(Qt::WA_TransparentForMouseEvents);
+	search->progressValue(
+	) | rpl::on_next([=](const SearchProgress &progress) {
+		line->setValue(ProgressRatio(progress));
+	}, line->lifetime());
+	rpl::combine(
+		row->widthValue(),
+		info->naturalWidthValue()
+	) | rpl::on_next([=](int width, int) {
+		info->resizeToNaturalWidth(width);
+		label->resizeToWidth(std::max(width - info->width(), 0));
+		info->moveToRight(0, 0, width);
+		label->moveToLeft(0, 0, width);
+		line->setGeometry(
+			0,
+			row->height() - st::mediaPlayerPlayback.fullWidth,
+			width,
+			st::mediaPlayerPlayback.fullWidth);
+	}, row->lifetime());
+
+	box->addRow(
+		object_ptr<Ui::FlatLabel>(
+			box,
+			tr::ayu_DownloadVideosProgressAbout(),
+			st::exportAboutLabel),
+		st::exportAboutPadding);
+	box->addSkip(st::boxPadding.bottom());
+
+	box->addButton(tr::ayu_DownloadVideosHide(), [=] { box->closeBox(); });
+	box->addButton(
+		tr::lng_export_stop(),
+		[=] { StopWithConfirmation(box, session); },
+		st::attentionBoxButton);
+}
+
+void ShowDownloadVideosResult(
+		not_null<Main::Session*> session,
+		SearchOutcome outcome) {
+	const auto window = session->tryResolveWindow(outcome.channel);
+	if (!window) {
+		return;
+	}
+	if (outcome.failed) {
+		window->show(Ui::MakeInformBox(tr::ayu_DownloadVideosFailed()));
+	} else if (outcome.videos.empty()) {
+		window->show(Ui::MakeInformBox(outcome.partial
+			? (tr::ayu_DownloadVideosStoppedEarly(tr::now)
+				+ u"\n\n"_q
+				+ tr::ayu_DownloadVideosNotFound(tr::now))
+			: tr::ayu_DownloadVideosNotFound(tr::now)));
+	} else {
+		window->show(Box(ResultBox, session, std::move(outcome)));
+	}
 }

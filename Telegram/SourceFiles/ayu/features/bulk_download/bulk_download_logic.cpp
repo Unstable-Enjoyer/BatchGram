@@ -9,7 +9,9 @@
 #include <QDateTime>
 
 #include <algorithm>
+#include <map>
 #include <set>
+#include <utility>
 
 namespace AyuBulkDownload {
 
@@ -112,6 +114,13 @@ std::vector<std::vector<int64>> ChunkIds(
 std::vector<int64> SelectVideos(
 		const std::vector<MatchedPost> &posts,
 		const std::vector<Candidate> &candidates) {
+	return SelectMedia(posts, candidates, false).videos;
+}
+
+MediaSelection SelectMedia(
+		const std::vector<MatchedPost> &posts,
+		const std::vector<Candidate> &candidates,
+		bool includePhotos) {
 	auto groups = std::set<uint64>();
 	auto singles = std::set<int64>();
 	for (const auto &post : posts) {
@@ -127,26 +136,130 @@ std::vector<int64> SelectVideos(
 			const Candidate &b) {
 		return a.msgId < b.msgId;
 	});
-	auto result = std::vector<int64>();
+	const auto inPost = [&](const Candidate &candidate) {
+		return candidate.groupId
+			? groups.contains(candidate.groupId)
+			: singles.contains(candidate.msgId);
+	};
+	// Post key: the album group, or the single message id.
+	using PostKey = std::pair<uint64, int64>;
+	const auto key = [](const Candidate &candidate) {
+		return candidate.groupId
+			? PostKey(candidate.groupId, 0)
+			: PostKey(0, candidate.msgId);
+	};
+	auto result = MediaSelection();
 	auto messages = std::set<int64>();
 	auto documents = std::set<uint64>();
+	auto firstVideo = std::map<PostKey, int64>();
 	for (const auto &candidate : sorted) {
 		if (!candidate.isVideo || candidate.skip || !candidate.documentId) {
 			continue;
-		}
-		const auto inPost = candidate.groupId
-			? groups.contains(candidate.groupId)
-			: singles.contains(candidate.msgId);
-		if (!inPost) {
+		} else if (!inPost(candidate)) {
 			continue;
 		} else if (!messages.insert(candidate.msgId).second) {
 			continue;
 		} else if (!documents.insert(candidate.documentId).second) {
 			continue;
 		}
-		result.push_back(candidate.msgId);
+		result.videos.push_back(candidate.msgId);
+		firstVideo.emplace(key(candidate), candidate.msgId);
+	}
+	if (!includePhotos) {
+		return result;
+	}
+	auto photos = std::set<uint64>();
+	for (const auto &candidate : sorted) {
+		if (!candidate.photoId || !inPost(candidate)) {
+			continue;
+		}
+		const auto i = firstVideo.find(key(candidate));
+		if (i == firstVideo.end()) {
+			continue;
+		} else if (!messages.insert(candidate.msgId).second) {
+			continue;
+		} else if (!photos.insert(candidate.photoId).second) {
+			continue;
+		}
+		result.photos.push_back({
+			.msgId = candidate.msgId,
+			.videoMsgId = i->second,
+		});
 	}
 	return result;
+}
+
+PathParts SplitPath(const QString &path) {
+	const auto slash = std::max(
+		path.lastIndexOf(QChar('/')),
+		path.lastIndexOf(QChar('\\')));
+	const auto dot = path.lastIndexOf(QChar('.'));
+	if (dot <= slash + 1) {
+		return { path, QString() };
+	}
+	return { path.mid(0, dot), path.mid(dot) };
+}
+
+QString PhotoPathForVideo(
+		const QString &videoPath,
+		const QString &photoExtension) {
+	return SplitPath(videoPath).base + photoExtension;
+}
+
+QString ReserveName(
+		NameReservation &reservation,
+		const QString &base,
+		const QString &extension,
+		const std::function<bool(const QString&)> &exists) {
+	const auto make = [&](int index) {
+		return index
+			? (base + QString(" (%1)").arg(index + 1) + extension)
+			: (base + extension);
+	};
+	const auto key = base + extension;
+	auto index = reservation.next[key];
+	auto result = make(index);
+	while (reservation.taken.contains(result)
+		|| (exists && exists(result))) {
+		result = make(++index);
+	}
+	reservation.next[key] = index + 1;
+	reservation.taken.insert(result);
+	return result;
+}
+
+QString ResolveDownloadFolder(
+		const QString &folderOverride,
+		const QString &setting,
+		const QString &tmpMarker,
+		const QString &defaultFolder,
+		const QString &tempFolder) {
+	auto result = !folderOverride.isEmpty()
+		? folderOverride
+		: setting.isEmpty()
+		? defaultFolder
+		: (setting == tmpMarker)
+		? tempFolder
+		: setting;
+	if (!result.isEmpty() && !result.endsWith(QChar('/'))) {
+		result += QChar('/');
+	}
+	return result;
+}
+
+int ProgressTotal(const SearchProgress &progress) {
+	return std::max(progress.total, progress.scanned);
+}
+
+float64 ProgressRatio(const SearchProgress &progress) {
+	const auto total = ProgressTotal(progress);
+	return (total > 0)
+		? std::clamp(float64(progress.scanned) / total, 0., 1.)
+		: 0.;
+}
+
+bool IsPartialResult(bool failed, int scanned) {
+	return failed && (scanned > 0);
 }
 
 } // namespace AyuBulkDownload

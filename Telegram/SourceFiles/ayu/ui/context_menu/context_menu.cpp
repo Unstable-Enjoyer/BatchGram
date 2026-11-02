@@ -499,9 +499,7 @@ void AddDownloadVideosAction(PeerData *peerData,
 		return;
 	}
 	addCallback(tr::ayu_DownloadVideos(tr::now), [=] {
-		sessionController->show(Box(
-			DownloadVideosBox,
-			not_null<ChannelData*>(channel)));
+		ShowDownloadVideos(sessionController, channel);
 	}, &st::menuIconDownload);
 }
 
