@@ -141,7 +141,7 @@ void DownloadVideosBox(
 			std::move(datesText),
 			st::boxLabel),
 		st::exportLimitsPadding);
-	box->addSkip(st::boxPadding.bottom());
+	box->addSkip(st::boxLittleSkip);
 	label->overrideLinkClickHandler([=](const QString &url) {
 		if (url == u"internal:edit_from"_q) {
 			EditDateLimit(
@@ -168,7 +168,9 @@ void DownloadVideosBox(
 		const auto ids = std::move(result.ids);
 		if (ids.empty()) {
 			box->uiShow()->showBox(Ui::MakeInformBox(result.restricted
-				? tr::ayu_DownloadVideosRestricted()
+				? (channel->isMegagroup()
+					? tr::lng_error_nocopy_group()
+					: tr::lng_error_nocopy_channel())
 				: tr::ayu_DownloadVideosNotFound()));
 			return;
 		}

@@ -9199,5 +9199,4 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "ayu_DownloadVideosConfirm#one" = "Download {count} video?";
 "ayu_DownloadVideosConfirm#other" = "Download {count} videos?";
 "ayu_DownloadVideosNotFound" = "No videos found.";
-"ayu_DownloadVideosRestricted" = "Saving videos from this chat is restricted.";
 "ayu_DownloadVideosFailed" = "Could not search for videos. Please try again later.";

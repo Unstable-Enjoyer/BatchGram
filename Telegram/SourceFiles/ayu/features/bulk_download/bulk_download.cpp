@@ -96,12 +96,12 @@ struct Reservation {
 			? (base + u" (%1)"_q.arg(index + 1) + extension)
 			: (base + extension);
 	};
-	auto index = reservation.next[base];
+	auto index = reservation.next[base + extension];
 	auto result = make(index);
 	while (reservation.taken.contains(result) || QFileInfo::exists(result)) {
 		result = make(++index);
 	}
-	reservation.next[base] = index + 1;
+	reservation.next[base + extension] = index + 1;
 	reservation.taken.insert(result);
 #ifdef Q_OS_WIN
 	// Same masking as FileNameForSave().
