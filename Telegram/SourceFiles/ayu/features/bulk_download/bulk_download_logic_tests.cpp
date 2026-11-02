@@ -77,6 +77,14 @@ void TestSearchText() {
 	q.phrase = QStringLiteral("hello");
 	q.hashtag = QStringLiteral("#tag");
 	CHECK(SearchText(q) == QStringLiteral("hello #tag"));
+
+	auto phraseOnly = Query();
+	phraseOnly.phrase = QStringLiteral("hello");
+	CHECK(SearchText(phraseOnly) == QStringLiteral("hello"));
+
+	auto hashtagOnly = Query();
+	hashtagOnly.hashtag = QStringLiteral("#tag");
+	CHECK(SearchText(hashtagOnly) == QStringLiteral("#tag"));
 }
 
 void TestServerMinDate() {

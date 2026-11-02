@@ -7,7 +7,7 @@
 #include "ayu/ui/boxes/download_videos_box.h"
 
 #include "ayu/features/bulk_download/bulk_download.h"
-#include "data/data_peer.h"
+#include "data/data_channel.h"
 #include "lang/lang_keys.h"
 #include "main/main_session.h"
 #include "ui/boxes/calendar_box.h"
@@ -37,6 +37,7 @@ void EditDateLimit(
 		QDate current,
 		QDate min,
 		QDate max,
+		rpl::producer<QString> resetLabel,
 		Fn<void(QDate)> done) {
 	const auto highlighted = current.isValid()
 		? current
@@ -48,7 +49,7 @@ void EditDateLimit(
 	const auto shared = std::make_shared<base::weak_qptr<Ui::CalendarBox>>();
 	const auto finalize = [=](not_null<Ui::CalendarBox*> calendar) {
 		calendar->addLeftButton(
-			tr::lng_export_from_beginning(),
+			std::move(resetLabel),
 			crl::guard(box, [=] {
 				done(QDate());
 				if (const auto weak = shared->get()) {
@@ -95,7 +96,7 @@ void EditDateLimit(
 
 void DownloadVideosBox(
 		not_null<Ui::GenericBox*> box,
-		not_null<PeerData*> peer) {
+		not_null<ChannelData*> channel) {
 	const auto state = box->lifetime().make_state<State>();
 	const auto content = box->verticalLayout();
 
@@ -140,6 +141,7 @@ void DownloadVideosBox(
 			std::move(datesText),
 			st::boxLabel),
 		st::exportLimitsPadding);
+	box->addSkip(st::boxPadding.bottom());
 	label->overrideLinkClickHandler([=](const QString &url) {
 		if (url == u"internal:edit_from"_q) {
 			EditDateLimit(
@@ -147,6 +149,7 @@ void DownloadVideosBox(
 				state->from.current(),
 				QDate(),
 				state->till.current(),
+				tr::lng_export_from_beginning(),
 				[=](QDate date) { state->from = date; });
 		} else if (url == u"internal:edit_till"_q) {
 			EditDateLimit(
@@ -154,20 +157,23 @@ void DownloadVideosBox(
 				state->till.current(),
 				state->from.current(),
 				QDate(),
+				tr::lng_export_till_end(),
 				[=](QDate date) { state->till = date; });
 		}
 	});
 
-	const auto found = [=](std::vector<FullMsgId> ids) {
+	const auto found = [=](AyuBulkDownload::SearchResult result) {
 		state->searching = false;
 		box->showLoading(false);
+		const auto ids = std::move(result.ids);
 		if (ids.empty()) {
-			box->uiShow()->showBox(Ui::MakeInformBox(
-				tr::ayu_DownloadVideosNotFound()));
+			box->uiShow()->showBox(Ui::MakeInformBox(result.restricted
+				? tr::ayu_DownloadVideosRestricted()
+				: tr::ayu_DownloadVideosNotFound()));
 			return;
 		}
 		const auto weak = base::make_weak(box);
-		const auto session = &peer->session();
+		const auto session = &channel->session();
 		box->uiShow()->showBox(Ui::MakeConfirmBox({
 			.text = tr::ayu_DownloadVideosConfirm(
 				tr::now,
@@ -184,10 +190,10 @@ void DownloadVideosBox(
 			.cancelText = tr::lng_cancel(),
 		}));
 	};
-	const auto failed = [=](QString error) {
+	const auto failed = [=] {
 		state->searching = false;
 		box->showLoading(false);
-		box->uiShow()->showToast(error);
+		box->uiShow()->showToast(tr::ayu_DownloadVideosFailed(tr::now));
 	};
 
 	const auto submit = [=] {
@@ -197,7 +203,7 @@ void DownloadVideosBox(
 		state->searching = true;
 		box->showLoading(true);
 		state->search = std::make_unique<AyuBulkDownload::VideoSearch>(
-			peer,
+			channel,
 			AyuBulkDownload::PrepareQuery(
 				phrase->getLastText(),
 				hashtag->getLastText(),
@@ -214,6 +220,13 @@ void DownloadVideosBox(
 	}, phrase->lifetime());
 	hashtag->submits(
 	) | rpl::on_next(submit, hashtag->lifetime());
+
+	// The box stays alive during its hide animation, so make sure late
+	// results don't open anything after it was closed.
+	box->boxClosing() | rpl::on_next([=] {
+		state->search = nullptr;
+		state->searching = false;
+	}, box->lifetime());
 
 	box->setFocusCallback([=] {
 		phrase->setFocusFast();

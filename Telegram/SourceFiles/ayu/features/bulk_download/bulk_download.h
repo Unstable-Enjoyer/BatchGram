@@ -10,7 +10,7 @@
 #include "data/data_msg_id.h"
 #include "mtproto/sender.h"
 
-class PeerData;
+class ChannelData;
 class HistoryItem;
 
 namespace Main {
@@ -19,16 +19,24 @@ class Session;
 
 namespace AyuBulkDownload {
 
+struct SearchResult {
+	std::vector<FullMsgId> ids;
+	// No ids, but matched posts had videos that can't be saved.
+	bool restricted = false;
+};
+
 // Finds videos of the posts that match the query using server-side
 // messages.search, then loads the full albums of matched posts.
+// Channels and supergroups only: album neighbors are found by adjacent
+// message ids, which are per-chat only there.
 // Destroying the object cancels all pending requests.
 class VideoSearch final {
 public:
 	VideoSearch(
-		not_null<PeerData*> peer,
+		not_null<ChannelData*> channel,
 		Query query,
-		Fn<void(std::vector<FullMsgId>)> done,
-		Fn<void(QString)> fail);
+		Fn<void(SearchResult)> done,
+		Fn<void()> fail);
 
 	void start();
 
@@ -41,10 +49,10 @@ private:
 	[[nodiscard]] HistoryItem *lookup(int64 id) const;
 	[[nodiscard]] std::vector<std::vector<int64>> albums() const;
 
-	const not_null<PeerData*> _peer;
+	const not_null<ChannelData*> _channel;
 	const Query _query;
-	const Fn<void(std::vector<FullMsgId>)> _done;
-	const Fn<void(QString)> _fail;
+	const Fn<void(SearchResult)> _done;
+	const Fn<void()> _fail;
 	MTP::Sender _api;
 
 	MsgId _offsetId = 0;
@@ -54,9 +62,9 @@ private:
 
 };
 
-// Queues the videos into the Downloads manager through the regular
-// tracked save path (DocumentSaveClickHandler::SaveAndTrack), always into
-// the default download folder, even with "Ask download path" enabled.
+// Saves the videos to the default download folder and tracks them in the
+// Downloads manager, like DocumentSaveClickHandler::SaveAndTrack, but
+// without a dialog even with "Ask download path" enabled.
 void StartDownloads(
 	not_null<Main::Session*> session,
 	const std::vector<FullMsgId> &ids);

@@ -492,20 +492,17 @@ void AddDownloadVideosAction(PeerData *peerData,
 							 Data::Thread *thread,
 							 not_null<Window::SessionController*> sessionController,
 							 const Window::PeerMenuCallback &addCallback) {
-	if (!peerData || !(peerData->isChannel() || peerData->isChat())) {
+	const auto channel = peerData ? peerData->asChannel() : nullptr;
+	if (!channel || channel->isMonoforum()) {
+		return;
+	} else if (thread && thread->asTopic()) {
 		return;
 	}
-	if (thread && thread->asTopic()) {
-		return;
-	}
-	const auto peer = not_null<PeerData*>(peerData);
-	addCallback(
-		tr::ayu_DownloadVideos(tr::now),
-		[=]
-		{
-			sessionController->show(Box(DownloadVideosBox, peer));
-		},
-		&st::menuIconDownload);
+	addCallback(tr::ayu_DownloadVideos(tr::now), [=] {
+		sessionController->show(Box(
+			DownloadVideosBox,
+			not_null<ChannelData*>(channel)));
+	}, &st::menuIconDownload);
 }
 
 void AddHistoryAction(not_null<Ui::PopupMenu*> menu, HistoryItem *item) {

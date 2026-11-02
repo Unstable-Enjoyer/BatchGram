@@ -14,15 +14,14 @@
 #include "data/data_channel.h"
 #include "data/data_document.h"
 #include "data/data_download_manager.h"
-#include "data/data_file_click_handler.h"
 #include "data/data_media_types.h"
-#include "data/data_peer.h"
 #include "data/data_session.h"
 #include "history/history_item.h"
 #include "main/main_session.h"
 #include "storage/storage_account.h"
 
 #include <map>
+#include <set>
 
 namespace AyuBulkDownload {
 namespace {
@@ -45,50 +44,65 @@ using MessagesList = QVector<MTPMessage>;
 }
 
 [[nodiscard]] bool AlreadyHave(not_null<DocumentData*> document) {
-	return document->loading()
-		|| !document->filepath(true).isEmpty()
-		|| document->forbidsFileSave();
+	return document->loading() || !document->filepath(true).isEmpty();
 }
+
+// Paths picked during one StartDownloads() batch. A file may be created
+// only when its download finishes, so `exists()` alone can't tell that
+// a name is taken. `next` keeps the " (N)" search from restarting at 0.
+struct Reservation {
+	std::set<QString> taken;
+	std::map<QString, int> next;
+};
 
 // Same target as FileNameUnsafe() picks when it does not ask:
 // the default download folder, the document name (or a timestamped
-// "video_..." name) and a " (N)" suffix when the file already exists.
+// "video_..." name) and a " (N)" suffix when the name is taken.
 [[nodiscard]] QString DefaultDownloadFilePath(
-		not_null<DocumentData*> document) {
+		not_null<DocumentData*> document,
+		Reservation &reservation) {
 	const auto session = &document->session();
 	const auto setting = Core::App().settings().downloadPath();
-	const auto folder = setting.isEmpty()
+	auto folder = setting.isEmpty()
 		? File::DefaultDownloadPath(session)
 		: (setting == FileDialog::Tmp())
 		? session->local().tempDirectory()
 		: setting;
 	if (folder.isEmpty()) {
 		return QString();
+	} else if (!folder.endsWith('/')) {
+		folder += '/';
 	}
 	if (!QDir().exists(folder)) {
 		QDir().mkpath(folder);
 	}
-	const auto name = base::FileNameFromUserString(document->filename());
-	auto result = QString();
+	auto name = base::FileNameFromUserString(document->filename());
 	if (name.isEmpty() || name.at(0) == QChar::fromLatin1('.')) {
 		const auto patterns = Core::MimeTypeForName(
 			document->mimeString()).globPatterns();
-		auto extension = name.isEmpty()
-			? (patterns.isEmpty()
-				? u".mov"_q
-				: QString(patterns.front()).replace('*', QString()))
-			: name;
-		result = filedialogDefaultName(u"video"_q, extension, folder);
-	} else {
-		const auto dot = name.lastIndexOf('.');
-		const auto start = (dot >= 0) ? name.mid(0, dot) : name;
-		const auto extension = (dot >= 0) ? name.mid(dot) : QString();
-		const auto base = folder + start;
-		result = base + extension;
-		for (auto i = 0; QFileInfo::exists(result); ++i) {
-			result = base + u" (%1)"_q.arg(i + 2) + extension;
-		}
+		const auto extension = !name.isEmpty()
+			? name
+			: patterns.isEmpty()
+			? u".mov"_q
+			: QString(patterns.front()).replace('*', QString());
+		// skipExistance: only the timestamped file name, checked below.
+		name = filedialogDefaultName(u"video"_q, extension, folder, true);
 	}
+	const auto dot = name.lastIndexOf('.');
+	const auto base = folder + ((dot >= 0) ? name.mid(0, dot) : name);
+	const auto extension = (dot >= 0) ? name.mid(dot) : QString();
+	const auto make = [&](int index) {
+		return index
+			? (base + u" (%1)"_q.arg(index + 1) + extension)
+			: (base + extension);
+	};
+	auto index = reservation.next[base];
+	auto result = make(index);
+	while (reservation.taken.contains(result) || QFileInfo::exists(result)) {
+		result = make(++index);
+	}
+	reservation.next[base] = index + 1;
+	reservation.taken.insert(result);
 #ifdef Q_OS_WIN
 	// Same masking as FileNameForSave().
 	const auto lower = result.trimmed().toLower();
@@ -101,18 +115,19 @@ using MessagesList = QVector<MTPMessage>;
 	return result;
 }
 
-// DocumentSaveClickHandler::SaveAndTrack(), but never asks for a path:
-// with "Ask download path" on, it would open a dialog for every file.
-void SaveAndTrackToDefaultFolder(
+// What DocumentSaveClickHandler::SaveAndTrack() does, with an explicit
+// path: it never asks for a path (with "Ask download path" on it would
+// open a dialog per file) and never takes Save()'s cache-only branch for
+// saveToCache() documents, so every started download goes to a file and
+// is tracked in the Downloads manager.
+void SaveToDefaultFolderAndTrack(
 		FullMsgId itemId,
-		not_null<DocumentData*> document) {
-	if (!Core::App().settings().askDownloadPath()) {
-		DocumentSaveClickHandler::SaveAndTrack(itemId, document);
-		return;
-	} else if (document->isNull()) {
+		not_null<DocumentData*> document,
+		Reservation &reservation) {
+	if (document->isNull() || document->forbidsFileSave()) {
 		return;
 	}
-	const auto path = DefaultDownloadFilePath(document);
+	const auto path = DefaultDownloadFilePath(document, reservation);
 	if (path.isEmpty()) {
 		return;
 	}
@@ -130,15 +145,15 @@ void SaveAndTrackToDefaultFolder(
 } // namespace
 
 VideoSearch::VideoSearch(
-	not_null<PeerData*> peer,
+	not_null<ChannelData*> channel,
 	Query query,
-	Fn<void(std::vector<FullMsgId>)> done,
-	Fn<void(QString)> fail)
-: _peer(peer)
+	Fn<void(SearchResult)> done,
+	Fn<void()> fail)
+: _channel(channel)
 , _query(std::move(query))
 , _done(std::move(done))
 , _fail(std::move(fail))
-, _api(&peer->session().mtp()) {
+, _api(&channel->session().mtp()) {
 }
 
 void VideoSearch::start() {
@@ -149,7 +164,7 @@ void VideoSearch::requestPage() {
 	// Flood waits are delayed and retried by the MTP layer, as usual.
 	_api.request(MTPmessages_Search(
 		MTP_flags(0),
-		_peer->input(),
+		_channel->input(),
 		MTP_string(SearchText(_query)),
 		MTP_inputPeerEmpty(), // from_id
 		MTPInputPeer(), // saved_peer_id
@@ -166,14 +181,14 @@ void VideoSearch::requestPage() {
 		MTP_long(0) // hash
 	)).done([=](const MTPmessages_Messages &result) {
 		pageReceived(result);
-	}).fail([=](const MTP::Error &error) {
-		_fail(error.type());
+	}).fail([=] {
+		_fail();
 	}).send();
 }
 
 void VideoSearch::pageReceived(const MTPmessages_Messages &result) {
-	auto &owner = _peer->owner();
-	owner.processExistingMessages(_peer->asChannel(), result);
+	auto &owner = _channel->owner();
+	owner.processExistingMessages(_channel, result);
 
 	const auto list = MessagesFrom(result);
 	auto minId = MsgId();
@@ -188,7 +203,7 @@ void VideoSearch::pageReceived(const MTPmessages_Messages &result) {
 			if (!minId || id < minId) {
 				minId = id;
 			}
-			const auto item = owner.message(_peer, id);
+			const auto item = owner.message(_channel, id);
 			if (!item
 				|| !Matches(_query, item->originalText().text, item->date())) {
 				continue;
@@ -225,38 +240,37 @@ void VideoSearch::requestNextChunk() {
 	for (const auto id : _chunks[_chunkIndex++]) {
 		ids.push_back(MTP_inputMessageID(MTP_int(id)));
 	}
-	const auto channel = _peer->asChannel();
-	const auto done = [=](const MTPmessages_Messages &result) {
-		_peer->owner().processExistingMessages(channel, result);
+	_api.request(MTPchannels_GetMessages(
+		_channel->inputChannel(),
+		MTP_vector<MTPInputMessage>(ids)
+	)).done([=](const MTPmessages_Messages &result) {
+		_channel->owner().processExistingMessages(_channel, result);
 		requestNextChunk();
-	};
-	// A failed chunk only means fewer album items, keep going.
-	const auto fail = [=] {
+	}).fail([=] {
+		// A failed chunk only means fewer album items, keep going.
 		requestNextChunk();
-	};
-	if (channel) {
-		_api.request(MTPchannels_GetMessages(
-			channel->inputChannel(),
-			MTP_vector<MTPInputMessage>(ids)
-		)).done(done).fail(fail).send();
-	} else {
-		_api.request(MTPmessages_GetMessages(
-			MTP_vector<MTPInputMessage>(ids)
-		)).done(done).fail(fail).send();
-	}
+	}).send();
 }
 
 void VideoSearch::finish() {
-	auto candidates = std::vector<Candidate>();
+	// `allowed` also skips videos that can't be saved, `any` does not,
+	// to tell "nothing found" from "found, but saving is restricted".
+	auto allowed = std::vector<Candidate>();
+	auto any = std::vector<Candidate>();
 	const auto add = [&](not_null<HistoryItem*> item) {
 		const auto video = VideoOf(item);
-		candidates.push_back({
+		const auto candidate = Candidate{
 			.msgId = item->id.bare,
 			.groupId = item->groupId().value,
 			.documentId = video ? uint64(video->id) : uint64(0),
 			.isVideo = (video != nullptr),
 			.skip = video && AlreadyHave(video),
-		});
+		};
+		any.push_back(candidate);
+		allowed.push_back(candidate);
+		if (video && video->forbidsFileSave()) {
+			allowed.back().skip = true;
+		}
 	};
 	for (const auto &post : _posts) {
 		if (!post.groupId) {
@@ -273,15 +287,17 @@ void VideoSearch::finish() {
 			}
 		}
 	}
-	auto result = std::vector<FullMsgId>();
-	for (const auto id : SelectVideos(_posts, candidates)) {
-		result.push_back(FullMsgId(_peer->id, MsgId(id)));
+	auto result = SearchResult();
+	for (const auto id : SelectVideos(_posts, allowed)) {
+		result.ids.push_back(FullMsgId(_channel->id, MsgId(id)));
 	}
+	result.restricted = result.ids.empty()
+		&& !SelectVideos(_posts, any).empty();
 	_done(std::move(result));
 }
 
 HistoryItem *VideoSearch::lookup(int64 id) const {
-	return _peer->owner().message(_peer, MsgId(id));
+	return _channel->owner().message(_channel, MsgId(id));
 }
 
 std::vector<std::vector<int64>> VideoSearch::albums() const {
@@ -302,13 +318,14 @@ std::vector<std::vector<int64>> VideoSearch::albums() const {
 void StartDownloads(
 		not_null<Main::Session*> session,
 		const std::vector<FullMsgId> &ids) {
+	auto reservation = Reservation();
 	for (const auto &id : ids) {
 		const auto item = session->data().message(id);
 		const auto video = item ? VideoOf(item) : nullptr;
-		if (!video || AlreadyHave(video)) {
+		if (!video || video->loading()) {
 			continue;
 		}
-		SaveAndTrackToDefaultFolder(id, video);
+		SaveToDefaultFolderAndTrack(id, video, reservation);
 	}
 }
 
