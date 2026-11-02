@@ -16,6 +16,7 @@
 #include "ayu/features/filters/filters_controller.h"
 #include "ayu/features/forward/ayu_forward.h"
 #include "ayu/features/forward/ayu_forward_rich.h"
+#include "ayu/ui/boxes/download_videos_box.h"
 #include "ayu/ui/context_menu/menu_item_subtext.h"
 #include "ayu/ui/message_history/history_section.h"
 #include "ayu/ui/settings/filters/edit_filter.h"
@@ -31,6 +32,7 @@
 #include "data/data_forum_topic.h"
 #include "data/data_search_controller.h"
 #include "data/data_session.h"
+#include "data/data_thread.h"
 #include "data/data_user.h"
 #include "history/history.h"
 #include "history/history_item_components.h"
@@ -484,6 +486,26 @@ void AddDeleteOwnMessagesAction(PeerData *peerData,
 		tr::ayu_DeleteOwnMessages(tr::now),
 		DeleteMyMessagesHandler(sessionController, peerData),
 		&st::menuIconTTL);
+}
+
+void AddDownloadVideosAction(PeerData *peerData,
+							 Data::Thread *thread,
+							 not_null<Window::SessionController*> sessionController,
+							 const Window::PeerMenuCallback &addCallback) {
+	if (!peerData || !(peerData->isChannel() || peerData->isChat())) {
+		return;
+	}
+	if (thread && thread->asTopic()) {
+		return;
+	}
+	const auto peer = not_null<PeerData*>(peerData);
+	addCallback(
+		tr::ayu_DownloadVideos(tr::now),
+		[=]
+		{
+			sessionController->show(Box(DownloadVideosBox, peer));
+		},
+		&st::menuIconDownload);
 }
 
 void AddHistoryAction(not_null<Ui::PopupMenu*> menu, HistoryItem *item) {

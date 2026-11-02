@@ -195,6 +195,8 @@ set(ayugram_files
         ayu/ui/boxes/donate_info_box.h
         ayu/ui/boxes/plugin_info_box.cpp
         ayu/ui/boxes/plugin_info_box.h
+        ayu/ui/boxes/download_videos_box.cpp
+        ayu/ui/boxes/download_videos_box.h
         ayu/ui/components/image_view.cpp
         ayu/ui/components/image_view.h
         ayu/ui/components/icon_picker.cpp
@@ -247,6 +249,10 @@ set(ayugram_files
         ayu/features/filters/filters_cache_controller.h
         ayu/features/filters/filters_utils.cpp
         ayu/features/filters/filters_utils.h
+        ayu/features/bulk_download/bulk_download.cpp
+        ayu/features/bulk_download/bulk_download.h
+        ayu/features/bulk_download/bulk_download_logic.cpp
+        ayu/features/bulk_download/bulk_download_logic.h
         ayu/data/messages_storage.cpp
         ayu/data/messages_storage.h
         ayu/data/entities.h
