@@ -6,14 +6,21 @@
 // Copyright @Radolyn, 2026
 #include "ayu/features/bulk_download/bulk_download.h"
 
+#include "base/base_file_utilities.h"
+#include "core/application.h"
+#include "core/core_settings.h"
+#include "core/file_utilities.h"
+#include "core/mime_type.h"
 #include "data/data_channel.h"
 #include "data/data_document.h"
+#include "data/data_download_manager.h"
 #include "data/data_file_click_handler.h"
 #include "data/data_media_types.h"
 #include "data/data_peer.h"
 #include "data/data_session.h"
 #include "history/history_item.h"
 #include "main/main_session.h"
+#include "storage/storage_account.h"
 
 #include <map>
 
@@ -41,6 +48,83 @@ using MessagesList = QVector<MTPMessage>;
 	return document->loading()
 		|| !document->filepath(true).isEmpty()
 		|| document->forbidsFileSave();
+}
+
+// Same target as FileNameUnsafe() picks when it does not ask:
+// the default download folder, the document name (or a timestamped
+// "video_..." name) and a " (N)" suffix when the file already exists.
+[[nodiscard]] QString DefaultDownloadFilePath(
+		not_null<DocumentData*> document) {
+	const auto session = &document->session();
+	const auto setting = Core::App().settings().downloadPath();
+	const auto folder = setting.isEmpty()
+		? File::DefaultDownloadPath(session)
+		: (setting == FileDialog::Tmp())
+		? session->local().tempDirectory()
+		: setting;
+	if (folder.isEmpty()) {
+		return QString();
+	}
+	if (!QDir().exists(folder)) {
+		QDir().mkpath(folder);
+	}
+	const auto name = base::FileNameFromUserString(document->filename());
+	auto result = QString();
+	if (name.isEmpty() || name.at(0) == QChar::fromLatin1('.')) {
+		const auto patterns = Core::MimeTypeForName(
+			document->mimeString()).globPatterns();
+		auto extension = name.isEmpty()
+			? (patterns.isEmpty()
+				? u".mov"_q
+				: QString(patterns.front()).replace('*', QString()))
+			: name;
+		result = filedialogDefaultName(u"video"_q, extension, folder);
+	} else {
+		const auto dot = name.lastIndexOf('.');
+		const auto start = (dot >= 0) ? name.mid(0, dot) : name;
+		const auto extension = (dot >= 0) ? name.mid(dot) : QString();
+		const auto base = folder + start;
+		result = base + extension;
+		for (auto i = 0; QFileInfo::exists(result); ++i) {
+			result = base + u" (%1)"_q.arg(i + 2) + extension;
+		}
+	}
+#ifdef Q_OS_WIN
+	// Same masking as FileNameForSave().
+	const auto lower = result.trimmed().toLower();
+	for (const auto &bad : { u".lnk"_q, u".scf"_q }) {
+		if (lower.endsWith(bad)) {
+			return result + u".download"_q;
+		}
+	}
+#endif // Q_OS_WIN
+	return result;
+}
+
+// DocumentSaveClickHandler::SaveAndTrack(), but never asks for a path:
+// with "Ask download path" on, it would open a dialog for every file.
+void SaveAndTrackToDefaultFolder(
+		FullMsgId itemId,
+		not_null<DocumentData*> document) {
+	if (!Core::App().settings().askDownloadPath()) {
+		DocumentSaveClickHandler::SaveAndTrack(itemId, document);
+		return;
+	} else if (document->isNull()) {
+		return;
+	}
+	const auto path = DefaultDownloadFilePath(document);
+	if (path.isEmpty()) {
+		return;
+	}
+	document->save(Data::FileOrigin(itemId), path);
+	if (document->loading() && !document->loadingFilePath().isEmpty()) {
+		if (const auto item = document->owner().message(itemId)) {
+			Core::App().downloadManager().addLoading({
+				.item = item,
+				.document = document,
+			});
+		}
+	}
 }
 
 } // namespace
@@ -224,7 +308,7 @@ void StartDownloads(
 		if (!video || AlreadyHave(video)) {
 			continue;
 		}
-		DocumentSaveClickHandler::SaveAndTrack(id, video);
+		SaveAndTrackToDefaultFolder(id, video);
 	}
 }
 

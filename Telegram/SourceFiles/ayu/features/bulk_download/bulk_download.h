@@ -55,7 +55,8 @@ private:
 };
 
 // Queues the videos into the Downloads manager through the regular
-// tracked save path (DocumentSaveClickHandler::SaveAndTrack).
+// tracked save path (DocumentSaveClickHandler::SaveAndTrack), always into
+// the default download folder, even with "Ask download path" enabled.
 void StartDownloads(
 	not_null<Main::Session*> session,
 	const std::vector<FullMsgId> &ids);
