@@ -14,6 +14,7 @@
 #include "data/data_channel.h"
 #include "data/data_document.h"
 #include "data/data_download_manager.h"
+#include "data/data_file_origin.h"
 #include "data/data_media_types.h"
 #include "data/data_session.h"
 #include "history/history_item.h"
