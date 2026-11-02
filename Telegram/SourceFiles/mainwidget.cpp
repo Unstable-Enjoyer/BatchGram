@@ -1128,6 +1128,7 @@ void MainWidget::setCurrentExportView(Export::View::PanelController *view) {
 				&& data.rows[0].id == Export::View::Content::kDoneId) {
 				LOG(("Export Info: Destroy top bar by Done."));
 				destroyExportTopBar();
+			// AyuGram: also recreate a bar that is hiding (shared slot).
 			} else if (!_exportTopBar || !_exportTopBar->toggled()) {
 				LOG(("Export Info: Create top bar by State."));
 				createExportTopBar(std::move(data));

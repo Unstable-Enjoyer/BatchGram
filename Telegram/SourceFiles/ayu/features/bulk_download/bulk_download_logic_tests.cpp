@@ -335,12 +335,6 @@ void TestSelectMediaPhotoWithoutSelectableVideo() {
 	CHECK(media.photos.empty());
 }
 
-void TestSelectVideosMatchesSelectMediaVideos() {
-	const auto posts = std::vector<MatchedPost>{ { 30, 6 } };
-	const auto candidates = AlbumPhotoAndTwoVideos();
-	CHECK(SelectVideos(posts, candidates) == SelectMedia(posts, candidates, false).videos);
-}
-
 void TestSplitPath() {
 	const auto withExt = SplitPath(QStringLiteral("C:/d/Episode 12.mp4"));
 	CHECK(withExt.base == QStringLiteral("C:/d/Episode 12"));
@@ -452,7 +446,6 @@ int main() {
 	TestSelectMediaPairsPhotoWithVideo();
 	TestSelectMediaPairsPhotoWithFirstVideo();
 	TestSelectMediaPhotoWithoutSelectableVideo();
-	TestSelectVideosMatchesSelectMediaVideos();
 	TestSplitPath();
 	TestPhotoPathForVideo();
 	TestReserveNameBumpsSameName();

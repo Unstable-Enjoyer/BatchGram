@@ -104,6 +104,7 @@ void TopBar::updateData(Content &&content) {
 			.append(QChar(0x2013)));
 	if (content.closable && !_close) { // AyuGram: close button.
 		_close.create(this, st::mediaPlayerClose);
+		_close->setAccessibleName(tr::lng_close(tr::now));
 		_close->setClickedCallback([=] { _closeClicks.fire({}); });
 	}
 	if (_close) {
