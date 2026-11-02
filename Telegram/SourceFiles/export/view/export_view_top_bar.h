@@ -14,6 +14,7 @@ namespace Ui {
 class FlatLabel;
 class FilledSlider;
 class AbstractButton;
+class IconButton;
 class PlainShadow;
 } // namespace Ui
 
@@ -27,6 +28,7 @@ public:
 	TopBar(QWidget *parent, Content &&content);
 
 	rpl::producer<Qt::MouseButton> clicks() const;
+	rpl::producer<> closeClicks() const; // AyuGram: Content::closable.
 
 	void updateData(Content &&content);
 
@@ -49,6 +51,8 @@ private:
 	object_ptr<Ui::PlainShadow> _shadow = { nullptr };
 	object_ptr<Ui::FilledSlider> _progress;
 	object_ptr<Ui::AbstractButton> _button;
+	object_ptr<Ui::IconButton> _close = { nullptr }; // AyuGram.
+	rpl::event_stream<> _closeClicks; // AyuGram.
 
 };
 

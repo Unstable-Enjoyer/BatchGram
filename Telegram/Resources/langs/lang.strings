@@ -9211,5 +9211,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "ayu_DownloadVideosProgressAbout" = "You can hide this window. The search will continue in the background.";
 "ayu_DownloadVideosHide" = "Hide";
 "ayu_DownloadVideosSureStop" = "Are you sure you want to stop searching for videos?";
+"ayu_DownloadVideosTopBarTitle" = "Searching videos";
 "ayu_DownloadVideosNotFound" = "No videos found.";
 "ayu_DownloadVideosFailed" = "Could not search for videos. Please try again later.";

@@ -9,6 +9,7 @@
 #include "ayu/features/bulk_download/bulk_download.h"
 #include "core/file_utilities.h"
 #include "data/data_channel.h"
+#include "export/view/export_view_content.h"
 #include "lang/lang_keys.h"
 #include "lang/lang_tag.h"
 #include "main/main_session.h"
@@ -144,9 +145,9 @@ void EditDateLimit(
 
 // Same confirmation as Export::View::PanelController::stopWithConfirmation.
 void StopWithConfirmation(
-		not_null<Ui::GenericBox*> box,
+		std::shared_ptr<Ui::Show> show,
 		not_null<Main::Session*> session) {
-	box->uiShow()->showBox(Ui::MakeConfirmBox({
+	show->showBox(Ui::MakeConfirmBox({
 		.text = tr::ayu_DownloadVideosSureStop(),
 		.confirmed = [=](Fn<void()> &&close) {
 			if (const auto search = VideoSearch::Find(session)) {
@@ -421,8 +422,53 @@ void DownloadVideosProgressBox(
 	box->addButton(tr::ayu_DownloadVideosHide(), [=] { box->closeBox(); });
 	box->addButton(
 		tr::lng_export_stop(),
-		[=] { StopWithConfirmation(box, session); },
+		[=] { StopWithConfirmation(box->uiShow(), session); },
 		st::attentionBoxButton);
+}
+
+rpl::producer<std::optional<Export::View::Content>>
+DownloadVideosTopBarContent(not_null<Main::Session*> session) {
+	using Result = std::optional<Export::View::Content>;
+	return rpl::single(
+		rpl::empty
+	) | rpl::then(
+		SearchChanges(session)
+	) | rpl::map([=]() -> rpl::producer<Result> {
+		const auto search = VideoSearch::Find(session);
+		if (!search) {
+			return rpl::single(Result());
+		}
+		const auto name = search->channel()->name();
+		return search->progressValue(
+		) | rpl::map([=](const SearchProgress &progress) {
+			auto result = Export::View::Content();
+			result.title = tr::ayu_DownloadVideosTopBarTitle(tr::now);
+			result.closable = true;
+			result.rows.push_back({
+				.id = u"ayu_bulk_download"_q,
+				.label = name,
+				.info = ProgressInfo(progress),
+				.progress = ProgressRatio(progress),
+			});
+			return Result(std::move(result));
+		});
+	}) | rpl::flatten_latest();
+}
+
+void DownloadVideosTopBarClicked(
+		not_null<Window::SessionController*> controller) {
+	const auto session = &controller->session();
+	if (VideoSearch::Find(session)) {
+		controller->show(Box(DownloadVideosProgressBox, session));
+	}
+}
+
+void DownloadVideosTopBarClosed(
+		not_null<Window::SessionController*> controller) {
+	const auto session = &controller->session();
+	if (VideoSearch::Find(session)) {
+		StopWithConfirmation(controller->uiShow(), session);
+	}
 }
 
 void ShowDownloadVideosResult(

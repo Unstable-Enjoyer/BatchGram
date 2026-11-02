@@ -6,6 +6,8 @@
 // Copyright @Radolyn, 2026
 #pragma once
 
+#include <optional>
+
 class ChannelData;
 
 namespace Ui {
@@ -15,6 +17,10 @@ class GenericBox;
 namespace Main {
 class Session;
 } // namespace Main
+
+namespace Export::View {
+struct Content;
+} // namespace Export::View
 
 namespace Window {
 class SessionController;
@@ -43,6 +49,19 @@ void DownloadVideosBox(
 void DownloadVideosProgressBox(
 	not_null<Ui::GenericBox*> box,
 	not_null<Main::Session*> session);
+
+// The export top bar's content for the account's running search, or
+// nullopt while none runs. MainWidget shows it in the export bar slot.
+[[nodiscard]] rpl::producer<std::optional<Export::View::Content>>
+DownloadVideosTopBarContent(not_null<Main::Session*> session);
+
+// Top bar click: reopens the progress box.
+void DownloadVideosTopBarClicked(
+	not_null<Window::SessionController*> controller);
+
+// Top bar close: the same stop confirmation as the progress box.
+void DownloadVideosTopBarClosed(
+	not_null<Window::SessionController*> controller);
 
 // Shows the result of a finished search in the account's window: the
 // download confirm, "No videos found." or the failure message.

@@ -27,6 +27,11 @@ struct Content {
 
 	std::vector<Row> rows;
 
+	// AyuGram: top bar title override (empty = export title) and close
+	// button (off for export), used by the bulk video search.
+	QString title;
+	bool closable = false;
+
 	static const QString kDoneId;
 
 };
