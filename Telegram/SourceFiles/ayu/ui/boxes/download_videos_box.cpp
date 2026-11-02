@@ -524,9 +524,6 @@ void ShowDownloadVideosResult(
 		return;
 	}
 	const auto window = &resolved->window();
-	if (!window) {
-		return;
-	}
 	if (outcome.failed) {
 		window->show(Ui::MakeInformBox(tr::ayu_DownloadVideosFailed()));
 	} else if (outcome.videos.empty()) {
