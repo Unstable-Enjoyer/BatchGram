@@ -7,11 +7,13 @@
 #include "ayu/ui/boxes/download_videos_box.h"
 
 #include "ayu/features/bulk_download/bulk_download.h"
+#include "core/application.h"
 #include "core/file_utilities.h"
 #include "data/data_channel.h"
 #include "export/view/export_view_content.h"
 #include "lang/lang_keys.h"
 #include "lang/lang_tag.h"
+#include "main/main_account.h"
 #include "main/main_session.h"
 #include "ui/boxes/calendar_box.h"
 #include "ui/boxes/confirm_box.h"
@@ -19,17 +21,21 @@
 #include "ui/layers/show.h"
 #include "ui/text/format_values.h"
 #include "ui/qt_object_factory.h"
+#include "ui/widgets/buttons.h"
 #include "ui/widgets/checkbox.h"
-#include "ui/widgets/continuous_sliders.h"
+#include "ui/effects/animations.h"
 #include "ui/widgets/fields/input_field.h"
 #include "ui/widgets/labels.h"
 #include "ui/wrap/vertical_layout.h"
+#include "window/window_controller.h"
+#include "window/window_separate_id.h"
 #include "window/window_session_controller.h"
 #include "styles/style_boxes.h"
 #include "styles/style_export.h"
 #include "styles/style_layers.h"
-#include "styles/style_media_player.h"
 #include "styles/style_widgets.h"
+
+#include <QtGui/QKeyEvent>
 
 using namespace AyuBulkDownload;
 
@@ -229,12 +235,24 @@ void ResultBox(
 			crl::guard(box, handleFolder));
 	});
 
-	box->addButton(tr::lng_media_download(), [=] {
+	const auto confirm = box->addButton(tr::lng_media_download(), [=] {
 		// The picked folder applies to this batch only.
 		StartDownloads(session, outcome, *picked);
 		box->closeBox();
 	});
 	box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
+
+	// Enter / Return confirms, as in Ui::ConfirmBox.
+	box->events(
+	) | rpl::on_next([=](not_null<QEvent*> e) {
+		if ((e->type() != QEvent::KeyPress) || !confirm) {
+			return;
+		}
+		const auto k = static_cast<QKeyEvent*>(e.get());
+		if (k->key() == Qt::Key_Enter || k->key() == Qt::Key_Return) {
+			confirm->clicked(Qt::KeyboardModifiers(), Qt::LeftButton);
+		}
+	}, box->lifetime());
 }
 
 } // namespace
@@ -328,6 +346,8 @@ void DownloadVideosBox(
 
 	const auto submit = [=] {
 		const auto session = &channel->session();
+		// One search per account: if one already runs (started from
+		// another window or channel), show its progress instead.
 		if (!VideoSearch::Find(session)) {
 			VideoSearch::Start(
 				channel,
@@ -366,6 +386,8 @@ void DownloadVideosProgressBox(
 
 	const auto search = VideoSearch::Find(session);
 	if (!search) {
+		// Not from inside the box setup: close once it is shown.
+		crl::on_main(box, [=] { box->closeBox(); });
 		return;
 	}
 	// The search lives in the account: hiding the box keeps it running,
@@ -388,14 +410,45 @@ void DownloadVideosProgressBox(
 		row,
 		search->progressValue() | rpl::map(ProgressInfo),
 		st::exportProgressInfoLabel);
-	const auto line = Ui::CreateChild<Ui::FilledSlider>(
-		row,
-		st::mediaPlayerPlayback);
-	line->setAttribute(Qt::WA_TransparentForMouseEvents);
+	struct Line {
+		float64 value = 0.;
+		Ui::Animations::Simple progress;
+	};
+	const auto line = row->lifetime().make_state<Line>();
+	// Same as ProgressWidget::Row::setInstanceProgress.
 	search->progressValue(
 	) | rpl::on_next([=](const SearchProgress &progress) {
-		line->setValue(ProgressRatio(progress));
-	}, line->lifetime());
+		const auto value = ProgressRatio(progress);
+		if (line->value < value) {
+			line->progress.start(
+				[=] { row->update(); },
+				line->value,
+				value,
+				st::exportProgressDuration,
+				anim::sineInOut);
+		} else if (line->value > value) {
+			line->progress.stop();
+		}
+		line->value = value;
+		row->update();
+	}, row->lifetime());
+	// Same as ProgressWidget::Row::paintEvent / paintInstance.
+	row->paintRequest(
+	) | rpl::on_next([=] {
+		auto p = QPainter(row);
+		const auto width = row->width();
+		const auto thickness = st::exportProgressWidth;
+		const auto top = row->height() - thickness;
+		p.fillRect(0, top, width, thickness, st::shadowFg);
+		const auto progress = line->progress.value(line->value);
+		const auto till = int(base::SafeRound(progress * width));
+		if (till > 0) {
+			p.fillRect(0, top, till, thickness, st::exportProgressFg);
+		}
+		if (till < width) {
+			p.fillRect(till, top, width - till, thickness, st::exportProgressBg);
+		}
+	}, row->lifetime());
 	rpl::combine(
 		row->widthValue(),
 		info->naturalWidthValue()
@@ -404,11 +457,6 @@ void DownloadVideosProgressBox(
 		label->resizeToWidth(std::max(width - info->width(), 0));
 		info->moveToRight(0, 0, width);
 		label->moveToLeft(0, 0, width);
-		line->setGeometry(
-			0,
-			row->height() - st::mediaPlayerPlayback.fullWidth,
-			width,
-			st::mediaPlayerPlayback.fullWidth);
 	}, row->lifetime());
 
 	box->addRow(
@@ -474,7 +522,12 @@ void DownloadVideosTopBarClosed(
 void ShowDownloadVideosResult(
 		not_null<Main::Session*> session,
 		SearchOutcome outcome) {
-	const auto window = session->tryResolveWindow(outcome.channel);
+	// As Main::Session::uploadsStopWithConfirmation: a session window,
+	// else the account's window (Core::Application::windowFor).
+	const auto resolved = session->tryResolveWindow(outcome.channel);
+	const auto window = resolved
+		? &resolved->window()
+		: Core::App().windowFor(Window::SeparateId(&session->account()));
 	if (!window) {
 		return;
 	}

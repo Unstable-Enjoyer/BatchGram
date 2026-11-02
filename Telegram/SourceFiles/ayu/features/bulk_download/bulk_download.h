@@ -98,7 +98,8 @@ private:
 
 	[[nodiscard]] HistoryItem *lookup(int64 id) const;
 	[[nodiscard]] std::vector<std::vector<int64>> albums() const;
-	[[nodiscard]] MediaSelection select() const;
+	// checkFiles: also skip already downloaded videos (stats files).
+	[[nodiscard]] MediaSelection select(bool checkFiles) const;
 
 	const not_null<ChannelData*> _channel;
 	const Query _query;

@@ -135,10 +135,14 @@ void DestroySearch(not_null<Main::Session*> session) {
 }
 
 // Unsavable videos (forbidsFileSave) are skipped silently.
-[[nodiscard]] bool SkipVideo(not_null<DocumentData*> document) {
+// The filepath check stats the file, so it's done only once, in finish():
+// the live progress count uses the cheap checks and may over-count.
+[[nodiscard]] bool SkipVideo(
+		not_null<DocumentData*> document,
+		bool checkFile) {
 	return document->loading()
-		|| !document->filepath(true).isEmpty()
-		|| document->forbidsFileSave();
+		|| document->forbidsFileSave()
+		|| (checkFile && !document->filepath(true).isEmpty());
 }
 
 [[nodiscard]] bool FileExists(const QString &path) {
@@ -497,14 +501,14 @@ void VideoSearch::requestNextChunk() {
 }
 
 void VideoSearch::updateProgress() {
-	const auto selection = select();
+	const auto selection = select(false);
 	auto progress = _progress.current();
 	progress.videos = int(selection.videos.size());
 	progress.photos = int(selection.photos.size());
 	_progress = progress;
 }
 
-MediaSelection VideoSearch::select() const {
+MediaSelection VideoSearch::select(bool checkFiles) const {
 	auto candidates = std::vector<Candidate>();
 	const auto add = [&](not_null<HistoryItem*> item) {
 		const auto video = VideoOf(item);
@@ -514,7 +518,7 @@ MediaSelection VideoSearch::select() const {
 			.groupId = item->groupId().value,
 			.documentId = video ? uint64(video->id) : uint64(0),
 			.isVideo = (video != nullptr),
-			.skip = video && SkipVideo(video),
+			.skip = video && SkipVideo(video, checkFiles),
 			.photoId = photo ? uint64(photo->id) : uint64(0),
 		});
 	};
@@ -542,7 +546,7 @@ void VideoSearch::finish() {
 	}
 	_finished = true;
 
-	const auto selection = select();
+	const auto selection = select(true);
 	const auto peerId = _channel->id;
 	auto outcome = SearchOutcome{
 		.channel = _channel,
