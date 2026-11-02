@@ -18,21 +18,22 @@
 #include "ui/effects/animations.h"
 #include "ui/layers/generic_box.h"
 #include "ui/layers/show.h"
-#include "ui/qt_object_factory.h"
 #include "ui/text/format_values.h"
+#include "ui/widgets/fields/input_field.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/checkbox.h"
-#include "ui/widgets/fields/input_field.h"
 #include "ui/widgets/labels.h"
 #include "ui/wrap/vertical_layout.h"
+#include "ui/qt_object_factory.h"
 #include "window/window_controller.h"
 #include "window/window_session_controller.h"
+
+#include <QtGui/QKeyEvent>
+
 #include "styles/style_boxes.h"
 #include "styles/style_export.h"
 #include "styles/style_layers.h"
 #include "styles/style_widgets.h"
-
-#include <QtGui/QKeyEvent>
 
 using namespace AyuBulkDownload;
 
