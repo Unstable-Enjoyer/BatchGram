@@ -7,28 +7,25 @@
 #include "ayu/ui/boxes/download_videos_box.h"
 
 #include "ayu/features/bulk_download/bulk_download.h"
-#include "core/application.h"
 #include "core/file_utilities.h"
 #include "data/data_channel.h"
 #include "export/view/export_view_content.h"
 #include "lang/lang_keys.h"
 #include "lang/lang_tag.h"
-#include "main/main_account.h"
 #include "main/main_session.h"
 #include "ui/boxes/calendar_box.h"
 #include "ui/boxes/confirm_box.h"
+#include "ui/effects/animations.h"
 #include "ui/layers/generic_box.h"
 #include "ui/layers/show.h"
-#include "ui/text/format_values.h"
 #include "ui/qt_object_factory.h"
+#include "ui/text/format_values.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/checkbox.h"
-#include "ui/effects/animations.h"
 #include "ui/widgets/fields/input_field.h"
 #include "ui/widgets/labels.h"
 #include "ui/wrap/vertical_layout.h"
 #include "window/window_controller.h"
-#include "window/window_separate_id.h"
 #include "window/window_session_controller.h"
 #include "styles/style_boxes.h"
 #include "styles/style_export.h"
@@ -522,12 +519,11 @@ void DownloadVideosTopBarClosed(
 void ShowDownloadVideosResult(
 		not_null<Main::Session*> session,
 		SearchOutcome outcome) {
-	// As Main::Session::uploadsStopWithConfirmation: a session window,
-	// else the account's window (Core::Application::windowFor).
 	const auto resolved = session->tryResolveWindow(outcome.channel);
-	const auto window = resolved
-		? &resolved->window()
-		: Core::App().windowFor(Window::SeparateId(&session->account()));
+	if (!resolved) {
+		return;
+	}
+	const auto window = &resolved->window();
 	if (!window) {
 		return;
 	}
