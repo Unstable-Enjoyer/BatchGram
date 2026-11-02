@@ -278,6 +278,152 @@ void TestSelectVideosAscendingOrder() {
 	CHECK(SelectVideos(posts, candidates) == expected);
 }
 
+Candidate Photo(int64 msgId, uint64 groupId, uint64 photoId) {
+	return Candidate{ msgId, groupId, 0, false, false, photoId };
+}
+
+// Album 6: photo 30 and videos 31, 32, all in one post.
+std::vector<Candidate> AlbumPhotoAndTwoVideos() {
+	return std::vector<Candidate>{
+		Photo(30, 6, 910),
+		Video(32, 6, 701, false),
+		Video(31, 6, 702, false),
+	};
+}
+
+void TestSelectMediaPhotosExcludedByDefault() {
+	// Album 5: photo 20 and video 21.
+	const auto posts = std::vector<MatchedPost>{ { 20, 5 } };
+	const auto candidates = std::vector<Candidate>{
+		Photo(20, 5, 900),
+		Video(21, 5, 600, false),
+	};
+	CHECK(SelectMedia(posts, candidates, false).photos.empty());
+}
+
+void TestSelectMediaPairsPhotoWithVideo() {
+	const auto posts = std::vector<MatchedPost>{ { 20, 5 } };
+	const auto candidates = std::vector<Candidate>{
+		Photo(20, 5, 900),
+		Video(21, 5, 600, false),
+	};
+	const auto media = SelectMedia(posts, candidates, true);
+	const auto expectedVideos = std::vector<int64>{ 21 };
+	const auto expectedPhotos = std::vector<PhotoPick>{ { 20, 21 } };
+	CHECK(media.videos == expectedVideos);
+	CHECK(media.photos == expectedPhotos);
+}
+
+void TestSelectMediaPairsPhotoWithFirstVideo() {
+	const auto posts = std::vector<MatchedPost>{ { 30, 6 } };
+	const auto media = SelectMedia(posts, AlbumPhotoAndTwoVideos(), true);
+	const auto expectedVideos = std::vector<int64>{ 31, 32 };
+	const auto expectedPhotos = std::vector<PhotoPick>{ { 30, 31 } };
+	CHECK(media.videos == expectedVideos);
+	CHECK(media.photos == expectedPhotos);
+}
+
+void TestSelectMediaPhotoWithoutSelectableVideo() {
+	// Album 7: photo 40 and video 41, but the video is skipped (already downloaded).
+	const auto posts = std::vector<MatchedPost>{ { 40, 7 } };
+	const auto candidates = std::vector<Candidate>{
+		Photo(40, 7, 920),
+		Video(41, 7, 703, true),
+	};
+	const auto media = SelectMedia(posts, candidates, true);
+	CHECK(media.videos.empty());
+	CHECK(media.photos.empty());
+}
+
+void TestSelectVideosMatchesSelectMediaVideos() {
+	const auto posts = std::vector<MatchedPost>{ { 30, 6 } };
+	const auto candidates = AlbumPhotoAndTwoVideos();
+	CHECK(SelectVideos(posts, candidates) == SelectMedia(posts, candidates, false).videos);
+}
+
+void TestSplitPath() {
+	const auto withExt = SplitPath(QStringLiteral("C:/d/Episode 12.mp4"));
+	CHECK(withExt.base == QStringLiteral("C:/d/Episode 12"));
+	CHECK(withExt.extension == QStringLiteral(".mp4"));
+
+	const auto noExt = SplitPath(QStringLiteral("C:/d/name"));
+	CHECK(noExt.base == QStringLiteral("C:/d/name"));
+	CHECK(noExt.extension.isEmpty());
+
+	// The only dot is in the folder name, so the file has no extension.
+	const auto dotInFolder = SplitPath(QStringLiteral("C:/a.b/file"));
+	CHECK(dotInFolder.base == QStringLiteral("C:/a.b/file"));
+	CHECK(dotInFolder.extension.isEmpty());
+}
+
+void TestPhotoPathForVideo() {
+	CHECK(PhotoPathForVideo(QStringLiteral("C:/d/Episode 12.mp4"), QStringLiteral(".jpg"))
+		== QStringLiteral("C:/d/Episode 12.jpg"));
+	CHECK(PhotoPathForVideo(QStringLiteral("C:/d/Episode 12 (2).mp4"), QStringLiteral(".jpg"))
+		== QStringLiteral("C:/d/Episode 12 (2).jpg"));
+}
+
+void TestReserveNameBumpsSameName() {
+	auto reservation = NameReservation();
+	const auto none = [](const QString &) { return false; };
+	CHECK(ReserveName(reservation, QStringLiteral("Episode"), QStringLiteral(".mp4"), none)
+		== QStringLiteral("Episode.mp4"));
+	CHECK(ReserveName(reservation, QStringLiteral("Episode"), QStringLiteral(".mp4"), none)
+		== QStringLiteral("Episode (2).mp4"));
+	// Same base, different extension: not bumped.
+	CHECK(ReserveName(reservation, QStringLiteral("Episode"), QStringLiteral(".jpg"), none)
+		== QStringLiteral("Episode.jpg"));
+}
+
+void TestReserveNameSkipsExistingFile() {
+	auto reservation = NameReservation();
+	const auto exists = [](const QString &name) {
+		return name == QStringLiteral("Episode.mp4");
+	};
+	CHECK(ReserveName(reservation, QStringLiteral("Episode"), QStringLiteral(".mp4"), exists)
+		== QStringLiteral("Episode (2).mp4"));
+}
+
+void TestResolveDownloadFolder() {
+	const auto tmp = QStringLiteral("#tmp");
+	const auto def = QStringLiteral("C:/Downloads");
+	const auto temp = QStringLiteral("C:/Temp");
+	// The override wins and gets a trailing '/'.
+	CHECK(ResolveDownloadFolder(QStringLiteral("D:/Picked"), QStringLiteral("E:/Set"), tmp, def, temp)
+		== QStringLiteral("D:/Picked/"));
+	// Empty setting falls back to the default folder.
+	CHECK(ResolveDownloadFolder(QString(), QString(), tmp, def, temp)
+		== QStringLiteral("C:/Downloads/"));
+	// The tmp marker gives the temp folder.
+	CHECK(ResolveDownloadFolder(QString(), tmp, tmp, def, temp)
+		== QStringLiteral("C:/Temp/"));
+	// A setting that already ends with '/' is not given a second one.
+	CHECK(ResolveDownloadFolder(QString(), QStringLiteral("E:/Set/"), tmp, def, temp)
+		== QStringLiteral("E:/Set/"));
+}
+
+void TestProgressRatioAndTotal() {
+	// Nothing scanned and total unknown: total 0, ratio 0.
+	auto progress = SearchProgress();
+	CHECK(ProgressTotal(progress) == 0);
+	CHECK(ProgressRatio(progress) == 0.);
+
+	// Scanned more than the server count: total follows scanned, ratio 1.
+	progress.scanned = 5;
+	progress.total = 3;
+	CHECK(ProgressTotal(progress) == 5);
+	CHECK(ProgressRatio(progress) == 1.);
+
+	progress.scanned = 50;
+	progress.total = 200;
+	CHECK(ProgressRatio(progress) == 0.25);
+}
+
+void TestIsPartialResult() {
+	CHECK(IsPartialResult(true, 5));
+	CHECK(!IsPartialResult(true, 0));
+}
+
 } // namespace
 
 int main() {
@@ -302,6 +448,18 @@ int main() {
 	TestSelectVideosSkippedExcluded();
 	TestSelectVideosDuplicatesRemoved();
 	TestSelectVideosAscendingOrder();
+	TestSelectMediaPhotosExcludedByDefault();
+	TestSelectMediaPairsPhotoWithVideo();
+	TestSelectMediaPairsPhotoWithFirstVideo();
+	TestSelectMediaPhotoWithoutSelectableVideo();
+	TestSelectVideosMatchesSelectMediaVideos();
+	TestSplitPath();
+	TestPhotoPathForVideo();
+	TestReserveNameBumpsSameName();
+	TestReserveNameSkipsExistingFile();
+	TestResolveDownloadFolder();
+	TestProgressRatioAndTotal();
+	TestIsPartialResult();
 
 	if (gFailed) {
 		std::fprintf(stderr, "bulk download logic tests: %d check(s) failed\n", gFailed);
