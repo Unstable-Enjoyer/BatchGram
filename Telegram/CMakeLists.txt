@@ -49,6 +49,10 @@ if (DESKTOP_APP_TEST_APPS)
     include(cmake/tests.cmake)
 endif()
 
+if (AYU_BULK_DOWNLOAD_TESTS)
+    include(cmake/ayu_bulk_download_tests.cmake)
+endif()
+
 if (WIN32)
     include(cmake/generate_midl.cmake)
     generate_midl(Telegram ${src_loc}

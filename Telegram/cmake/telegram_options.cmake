@@ -52,6 +52,7 @@ if (DESKTOP_APP_SPECIAL_TARGET)
     target_compile_definitions(Telegram PRIVATE TDESKTOP_ALLOW_CLOSED_ALPHA)
 endif()
 
+option(AYU_BULK_DOWNLOAD_TESTS "Build the bulk download logic unit test (console, development only)." OFF)
 option(DESKTOP_APP_DISABLE_SWIFT6 "Disable local on-device translation (build without Swift 6 on macOS)." OFF)
 if (DESKTOP_APP_DISABLE_SWIFT6)
     target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_SWIFT6)
