@@ -34,6 +34,14 @@ namespace {
 		Ui::StringWithNumbers::FromString);
 }
 
+[[nodiscard]] Ui::StringWithNumbers AddedText(int count) {
+	return tr::ayu_DownloadAddedFiles(
+		tr::now,
+		lt_count,
+		count,
+		Ui::StringWithNumbers::FromString);
+}
+
 } // namespace
 
 void ShowSelectionBar(
@@ -93,24 +101,19 @@ void ShowSelectionBar(
 	progress->setAttribute(Qt::WA_TransparentForMouseEvents);
 	progress->entity()->setAttribute(Qt::WA_TransparentForMouseEvents);
 
-	struct Flags {
-		bool preparing = false;
-		bool shown = false;
-	};
-	const auto flags = bar->lifetime().make_state<Flags>();
+	const auto shown = bar->lifetime().make_state<bool>(false);
 	selection->stateValue(
 	) | rpl::on_next([=](const SearchSelection::State &state) {
-		const auto animated = flags->shown
+		const auto animated = *shown
 			? anim::type::normal
 			: anim::type::instant;
-		flags->preparing = state.preparing;
-		label->entity()->setValue(SelectedText(state.count));
-		download->toggle(state.count > 0, animated);
-		progress->toggle(state.loading || state.preparing, animated);
+		label->entity()->setValue(state.adding
+			? AddedText(state.added)
+			: SelectedText(state.count));
+		download->toggle(!state.adding && state.count > 0, animated);
+		selectAll->toggle(!state.adding && !state.loading, animated);
+		progress->toggle(state.adding || state.loading, animated);
 		progress->entity()->setValue(state.progress);
-		selectAll->toggle(
-			!state.loading && !state.preparing,
-			animated);
 	}, bar->lifetime());
 
 	rpl::combine(
@@ -146,15 +149,12 @@ void ShowSelectionBar(
 		selection->selectAll();
 	});
 	download->entity()->setClickedCallback([=] {
-		if (flags->preparing) {
-			return;
-		}
-		const auto started = crl::guard(selection, [=] {
-			selection->close();
-		});
-		selection->prepareDownload(crl::guard(bar, [=](DownloadSet set) {
-			ShowDownloadConfirm(controller, std::move(set), started);
-		}));
+		ShowDownloadConfirm(
+			controller,
+			selection->finalCount(),
+			crl::guard(selection, [=](bool includePhotos, QString folder) {
+				selection->startDownload(includePhotos, folder);
+			}));
 	});
 
 	// Explicit exits fade out, the owner destroys the bar after the fade.
@@ -163,7 +163,7 @@ void ShowSelectionBar(
 		outer->hide(anim::type::normal);
 	}, bar->lifetime());
 
-	flags->shown = true;
+	*shown = true;
 	outer->raise();
 	outer->hide(anim::type::instant);
 	outer->show(anim::type::normal);

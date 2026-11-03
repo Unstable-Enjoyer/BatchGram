@@ -12,6 +12,8 @@
 #include "data/data_msg_id.h"
 #include "mtproto/sender.h"
 
+#include <optional>
+
 class ChannelData;
 class HistoryItem;
 class QPainter;
@@ -34,41 +36,118 @@ class RoundCheckbox;
 
 namespace AyuBulkDownload {
 
-struct PhotoItem {
-	FullMsgId photo;
-	FullMsgId video; // Its file name is reused for the photo.
-};
-
-// The media of the selected posts, shown in the download confirm.
-struct DownloadSet {
-	ChannelData *channel = nullptr;
-	std::vector<FullMsgId> videos;
-	std::vector<PhotoItem> photos; // Photos of the posts with a video.
-	int64 videosSize = 0;
-	int64 photosSize = 0; // Photos with a known byte size.
-	bool partial = false; // A "Select all" page failed.
-};
-
 // Where a batch goes by default: the download path setting, resolved
 // like upstream (default Downloads/Telegram folder or Temp folder).
 [[nodiscard]] QString DefaultDownloadFolder(
 	not_null<Main::Session*> session);
-
-// Saves the videos (and the photos, with includePhotos) to `folder` (the
-// default one when empty), with a per-batch name reservation and no file
-// dialog, even with "Ask download path" enabled. Videos are tracked in the
-// Downloads manager while they load; photos are added there when saved.
-void StartDownloads(
-	not_null<Main::Session*> session,
-	const DownloadSet &set,
-	bool includePhotos,
-	const QString &folder);
 
 // The channel of an in-chat search whose found posts can be selected,
 // or nullptr. Channels and supergroups only: album neighbors are found by
 // adjacent message ids, which are per-chat only there.
 [[nodiscard]] ChannelData *SelectableSearchChannel(
 	const Dialogs::SearchState &state);
+
+// Pages through messages.search (photos and videos) for a query.
+class SearchPager final {
+public:
+	struct Handlers {
+		Fn<void(std::vector<MatchedPost>)> page;
+		Fn<void(bool failed)> done;
+	};
+
+	SearchPager(not_null<ChannelData*> channel, QString query);
+
+	// The handlers may be replaced while a page is loading.
+	void start(Handlers handlers);
+	void setHandlers(Handlers handlers);
+
+	[[nodiscard]] bool loading() const;
+	[[nodiscard]] SearchProgress progress() const;
+
+private:
+	void requestPage();
+	void pageReceived(const MTPmessages_Messages &result);
+
+	const not_null<ChannelData*> _channel;
+	const QString _query;
+	MTP::Sender _api;
+	Handlers _handlers;
+	MsgId _offsetId = 0;
+	SearchProgress _progress;
+	bool _loading = false;
+
+};
+
+// Adds the media of the posts to the Downloads one post at a time, as soon
+// as each album is loaded, with one name reservation for the whole batch.
+// Lives in the account (Main::Session): it survives the search and is
+// destroyed when it finishes, when it is cancelled, or with the session.
+class DownloadBatch final : public base::has_weak_ptr {
+public:
+	struct State {
+		int added = 0; // Videos and photos sent to the Downloads.
+		float64 progress = 0.;
+
+		friend inline bool operator==(const State &, const State &)
+			= default;
+	};
+
+	DownloadBatch(
+		not_null<ChannelData*> channel,
+		PostSelection selection,
+		std::unique_ptr<SearchPager> pager,
+		bool includePhotos,
+		QString folder);
+	~DownloadBatch();
+
+	// `pager` keeps feeding the batch while it is loading.
+	static not_null<DownloadBatch*> Start(
+		not_null<ChannelData*> channel,
+		PostSelection selection,
+		std::unique_ptr<SearchPager> pager,
+		bool includePhotos,
+		const QString &folder);
+
+	// Stops adding, what is added stays in the Downloads.
+	void cancel();
+
+	[[nodiscard]] rpl::producer<State> stateValue() const;
+	[[nodiscard]] rpl::lifetime &lifetime();
+
+private:
+	void queue(MatchedPost post);
+	void processNext();
+	void addPost(MatchedPost post);
+	void checkFinished();
+	void finish();
+	void pushState();
+
+	[[nodiscard]] HistoryItem *lookup(int64 id) const;
+
+	const not_null<ChannelData*> _channel;
+	const bool _includePhotos = false;
+	const QString _folder;
+	MTP::Sender _api;
+	PostSelection _selection;
+	std::unique_ptr<SearchPager> _pager;
+	NameReservation _reservation;
+
+	std::vector<MatchedPost> _pending;
+	std::vector<MatchedPost> _requested;
+	std::set<int64> _queued;
+	std::set<uint64> _doneGroups;
+	mtpRequestId _requestId = 0;
+	int _processed = 0;
+	int _videos = 0;
+	int _photos = 0;
+	int _failedPosts = 0;
+	bool _pageFailed = false;
+	bool _finished = false;
+
+	rpl::variable<State> _state;
+	rpl::lifetime _lifetime;
+
+};
 
 // Posts picked in the in-chat search results of a channel. "Select all"
 // pages through messages.search for the same query in the background.
@@ -77,7 +156,8 @@ public:
 	struct State {
 		int count = 0;
 		bool loading = false; // "Select all" is paging.
-		bool preparing = false; // Albums are loading for the download.
+		bool adding = false; // A batch adds the selected posts.
+		int added = 0;
 		float64 progress = 0.;
 
 		friend inline bool operator==(const State &, const State &)
@@ -91,14 +171,18 @@ public:
 		Fn<void()> repaint);
 	~SearchSelection();
 
-	// Returns false for messages of other chats, they are never selected.
-	// After Download is pressed or while closing, nothing changes.
+	// Returns false for messages of other chats and while adding: those
+	// rows are never selected. While closing, nothing changes.
 	bool toggle(not_null<const HistoryItem*> item);
 	void selectAll();
-	// Waits for a running "Select all" to finish, then loads the albums.
-	void prepareDownload(Fn<void(DownloadSet)> ready);
-	// Cancels all requests, the owner destroys it after closeRequests().
+	// Hands the posts (and a running "Select all") to a new batch.
+	void startDownload(bool includePhotos, const QString &folder);
+	// The owner destroys it after closeRequests(), a running batch is
+	// cancelled.
 	void close();
+
+	// The number of selected posts, unless "Select all" may add more.
+	[[nodiscard]] std::optional<int> finalCount() const;
 
 	void paintCheck(
 		QPainter &p,
@@ -111,39 +195,24 @@ public:
 	[[nodiscard]] rpl::lifetime &lifetime();
 
 private:
-	void requestPage();
-	void pageReceived(const MTPmessages_Messages &result);
-	void pageFailed();
-	void pagingFinished();
-	void requestAlbums();
-	void requestNextChunk();
-	void finishPreparing();
 	void pushState();
-
-	[[nodiscard]] HistoryItem *lookup(int64 id) const;
-	[[nodiscard]] DownloadSet collect() const;
 
 	const not_null<ChannelData*> _channel;
 	const QString _query;
 	const Fn<std::vector<not_null<HistoryItem*>>()> _shownResults;
 	const Fn<void()> _repaint;
-	MTP::Sender _api;
 
 	PostSelection _selection;
 	base::flat_map<MsgId, std::unique_ptr<Ui::RoundCheckbox>> _checks;
 
-	mtpRequestId _requestId = 0;
-	MsgId _offsetId = 0;
-	SearchProgress _progress;
+	std::unique_ptr<SearchPager> _pager;
 	std::vector<MatchedPost> _found;
 	bool _foundAll = false;
-	bool _loading = false;
-	bool _partial = false;
 	bool _closing = false;
 
-	std::vector<std::vector<int64>> _chunks;
-	int _chunkIndex = 0;
-	Fn<void(DownloadSet)> _ready;
+	base::weak_ptr<DownloadBatch> _batch;
+	DownloadBatch::State _batchState;
+	bool _adding = false;
 
 	rpl::variable<State> _state;
 	rpl::event_stream<> _closeRequests;

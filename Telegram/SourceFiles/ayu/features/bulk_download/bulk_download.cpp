@@ -23,9 +23,11 @@
 #include "dialogs/dialogs_key.h"
 #include "history/history.h"
 #include "history/history_item.h"
+#include "lang/lang_keys.h"
 #include "main/main_session.h"
 #include "storage/storage_account.h"
 #include "ui/effects/round_checkbox.h"
+#include "window/window_session_controller.h"
 
 #include <map>
 
@@ -65,27 +67,56 @@ private:
 
 };
 
-[[nodiscard]] auto PhotoSavers()
--> std::map<not_null<Main::Session*>, std::unique_ptr<PhotoSaver>> & {
-	static auto result = std::map<
-		not_null<Main::Session*>,
-		std::unique_ptr<PhotoSaver>>();
+struct AccountData {
+	std::unique_ptr<PhotoSaver> photos;
+	std::vector<std::unique_ptr<DownloadBatch>> batches;
+};
+
+[[nodiscard]] auto Accounts()
+-> std::map<not_null<Main::Session*>, AccountData> & {
+	static auto result = std::map<not_null<Main::Session*>, AccountData>();
 	return result;
+}
+
+[[nodiscard]] AccountData &Account(not_null<Main::Session*> session) {
+	auto &accounts = Accounts();
+	const auto i = accounts.find(session);
+	if (i != accounts.end()) {
+		return i->second;
+	}
+	// Logout or session destruction cancels the batches and photo saves.
+	session->lifetime().add([=] {
+		auto taken = base::take(Accounts()[session]);
+		Accounts().erase(session);
+	});
+	return accounts[session];
 }
 
 [[nodiscard]] not_null<PhotoSaver*> PhotoSaverFor(
 		not_null<Main::Session*> session) {
-	auto &savers = PhotoSavers();
-	auto &result = savers[session];
+	auto &result = Account(session).photos;
 	if (!result) {
 		result = std::make_unique<PhotoSaver>(session);
-		// Logout or session destruction cancels the photo saves.
-		session->lifetime().add([=] {
-			auto taken = base::take(PhotoSavers()[session]);
-			PhotoSavers().erase(session);
-		});
 	}
 	return result.get();
+}
+
+void DestroyBatch(
+		not_null<DownloadBatch*> batch,
+		not_null<Main::Session*> session) {
+	auto &accounts = Accounts();
+	const auto i = accounts.find(session);
+	if (i == accounts.end()) {
+		return;
+	}
+	auto &batches = i->second.batches;
+	const auto j = ranges::find_if(batches, [&](const auto &owned) {
+		return (owned.get() == batch);
+	});
+	if (j != end(batches)) {
+		auto taken = std::move(*j);
+		batches.erase(j);
+	}
 }
 
 [[nodiscard]] const MessagesList *MessagesFrom(
@@ -248,6 +279,36 @@ void PhotoSaver::check() {
 	}
 }
 
+[[nodiscard]] QString AddedText(
+		int videos,
+		int photos,
+		bool includePhotos,
+		int failedPosts,
+		bool pageFailed) {
+	const auto countVideos = tr::ayu_DownloadVideosCount(
+		tr::now,
+		lt_count_decimal,
+		videos);
+	const auto items = includePhotos
+		? tr::ayu_DownloadVideosAndPhotos(
+			tr::now,
+			lt_videos,
+			countVideos,
+			lt_photos,
+			tr::ayu_DownloadPhotosCount(tr::now, lt_count_decimal, photos))
+		: countVideos;
+	auto result = tr::ayu_DownloadAdded(tr::now, lt_items, items);
+	if (failedPosts > 0) {
+		result += ' ' + tr::ayu_DownloadFailedPosts(
+			tr::now,
+			lt_count_decimal,
+			failedPosts);
+	} else if (pageFailed) {
+		result += ' ' + tr::ayu_DownloadSomeFailed(tr::now);
+	}
+	return result;
+}
+
 } // namespace
 
 QString DefaultDownloadFolder(not_null<Main::Session*> session) {
@@ -257,60 +318,6 @@ QString DefaultDownloadFolder(not_null<Main::Session*> session) {
 		FileDialog::Tmp(),
 		File::DefaultDownloadPath(session),
 		session->local().tempDirectory());
-}
-
-void StartDownloads(
-		not_null<Main::Session*> session,
-		const DownloadSet &set,
-		bool includePhotos,
-		const QString &folder) {
-	const auto target = ResolveDownloadFolder(
-		folder,
-		Core::App().settings().downloadPath(),
-		FileDialog::Tmp(),
-		File::DefaultDownloadPath(session),
-		session->local().tempDirectory());
-	if (target.isEmpty()) {
-		return;
-	}
-	if (!QDir().exists(target)) {
-		QDir().mkpath(target);
-	}
-	auto reservation = NameReservation();
-	auto videoPaths = std::map<FullMsgId, QString>();
-	for (const auto &id : set.videos) {
-		const auto item = session->data().message(id);
-		const auto video = item ? VideoOf(item) : nullptr;
-		if (!video || video->loading()) {
-			continue;
-		}
-		const auto path = SaveVideoAndTrack(id, video, target, reservation);
-		if (!path.isEmpty()) {
-			videoPaths.emplace(id, path);
-		}
-	}
-	if (!includePhotos || set.photos.empty()) {
-		return;
-	}
-	const auto saver = PhotoSaverFor(session);
-	for (const auto &[photoId, videoId] : set.photos) {
-		const auto i = videoPaths.find(videoId);
-		const auto item = session->data().message(photoId);
-		const auto photo = item ? PhotoOf(item) : nullptr;
-		if (i == videoPaths.end() || !photo) {
-			continue;
-		}
-		const auto parts = SplitPath(
-			PhotoPathForVideo(i->second, u".jpg"_q));
-		saver->add(
-			photoId,
-			photo,
-			ReserveName(
-				reservation,
-				parts.base,
-				parts.extension,
-				FileExists));
-	}
 }
 
 ChannelData *SelectableSearchChannel(const Dialogs::SearchState &state) {
@@ -325,6 +332,385 @@ ChannelData *SelectableSearchChannel(const Dialogs::SearchState &state) {
 	return (channel && !channel->isMonoforum()) ? channel : nullptr;
 }
 
+SearchPager::SearchPager(not_null<ChannelData*> channel, QString query)
+: _channel(channel)
+, _query(std::move(query))
+, _api(&channel->session().mtp()) {
+}
+
+void SearchPager::start(Handlers handlers) {
+	_handlers = std::move(handlers);
+	_loading = true;
+	requestPage();
+}
+
+void SearchPager::setHandlers(Handlers handlers) {
+	_handlers = std::move(handlers);
+}
+
+bool SearchPager::loading() const {
+	return _loading;
+}
+
+SearchProgress SearchPager::progress() const {
+	return _progress;
+}
+
+void SearchPager::requestPage() {
+	// Flood waits are delayed and retried by the MTP layer, as usual.
+	_api.request(MTPmessages_Search(
+		MTP_flags(0),
+		_channel->input(),
+		MTP_string(_query),
+		MTP_inputPeerEmpty(), // from_id
+		MTPInputPeer(), // saved_peer_id
+		MTPVector<MTPReaction>(), // saved_reaction
+		MTP_int(0), // top_msg_id
+		MTP_inputMessagesFilterPhotoVideo(),
+		MTP_int(0), // min_date
+		MTP_int(0), // max_date
+		MTP_int(_offsetId.bare),
+		MTP_int(0), // add_offset
+		MTP_int(kSearchPerPage),
+		MTP_int(0), // max_id
+		MTP_int(0), // min_id
+		MTP_long(0) // hash
+	)).done([=](const MTPmessages_Messages &result) {
+		pageReceived(result);
+	}).fail([=](const MTP::Error &error) {
+		LOG(("AyuGram bulk: search page failed: %1").arg(error.type()));
+		_loading = false;
+		_handlers.done(true);
+	}).send();
+}
+
+void SearchPager::pageReceived(const MTPmessages_Messages &result) {
+	auto &owner = _channel->owner();
+	owner.processExistingMessages(_channel, result);
+
+	const auto list = MessagesFrom(result);
+	auto minId = MsgId();
+	auto received = 0;
+	auto posts = std::vector<MatchedPost>();
+	if (list) {
+		for (const auto &message : *list) {
+			const auto id = IdFromMessage(message);
+			if (!id) {
+				continue;
+			}
+			++received;
+			if (!minId || id < minId) {
+				minId = id;
+			}
+			if (const auto item = owner.message(_channel, id)) {
+				posts.push_back({
+					.msgId = id.bare,
+					.groupId = item->groupId().value,
+				});
+			}
+		}
+	}
+	_progress.scanned += received;
+	_progress.total = std::max(_progress.total, TotalFrom(result));
+	LOG(("AyuGram bulk: page received: %1 received, %2 scanned, %3 total"
+		).arg(received
+		).arg(_progress.scanned
+		).arg(_progress.total));
+
+	const auto complete = !list
+		|| (result.type() == mtpc_messages_messages)
+		|| SearchPagingDone(received, _progress.scanned, _progress.total)
+		|| (_offsetId && minId >= _offsetId);
+	if (complete) {
+		LOG(("AyuGram bulk: paging done"));
+		_loading = false;
+	} else {
+		_offsetId = minId;
+		requestPage();
+	}
+	// The handlers may destroy neither this pager nor its owner.
+	_handlers.page(std::move(posts));
+	if (complete) {
+		_handlers.done(false);
+	}
+}
+
+DownloadBatch::DownloadBatch(
+	not_null<ChannelData*> channel,
+	PostSelection selection,
+	std::unique_ptr<SearchPager> pager,
+	bool includePhotos,
+	QString folder)
+: _channel(channel)
+, _includePhotos(includePhotos)
+, _folder(std::move(folder))
+, _api(&channel->session().mtp())
+, _selection(std::move(selection))
+, _pager(std::move(pager)) {
+}
+
+DownloadBatch::~DownloadBatch() = default;
+
+not_null<DownloadBatch*> DownloadBatch::Start(
+		not_null<ChannelData*> channel,
+		PostSelection selection,
+		std::unique_ptr<SearchPager> pager,
+		bool includePhotos,
+		const QString &folder) {
+	const auto session = &channel->session();
+	const auto target = ResolveDownloadFolder(
+		folder,
+		Core::App().settings().downloadPath(),
+		FileDialog::Tmp(),
+		File::DefaultDownloadPath(session),
+		session->local().tempDirectory());
+	if (!target.isEmpty() && !QDir().exists(target)) {
+		QDir().mkpath(target);
+	}
+	const auto posts = selection.posts();
+	auto &batches = Account(session).batches;
+	batches.push_back(std::make_unique<DownloadBatch>(
+		channel,
+		std::move(selection),
+		std::move(pager),
+		includePhotos,
+		target));
+	const auto result = batches.back().get();
+	LOG(("AyuGram bulk: batch started: %1 posts, paging: %2"
+		).arg(int(posts.size())
+		).arg(Logs::b(result->_pager != nullptr)));
+	if (const auto raw = result->_pager.get()) {
+		raw->setHandlers({
+			.page = [=](std::vector<MatchedPost> found) {
+				for (const auto &post : found) {
+					if (result->_selection.addFound(post)) {
+						result->queue(post);
+					}
+				}
+				result->processNext();
+			},
+			.done = [=](bool failed) {
+				if (failed) {
+					const auto progress = raw->progress();
+					result->_pageFailed = true;
+					result->_failedPosts += std::max(
+						progress.total - progress.scanned,
+						0);
+				}
+				crl::on_main(result, [=] {
+					result->checkFinished();
+				});
+			},
+		});
+	}
+	for (const auto &post : posts) {
+		result->queue(post);
+	}
+	result->processNext();
+	return result;
+}
+
+void DownloadBatch::cancel() {
+	if (_finished) {
+		return;
+	}
+	LOG(("AyuGram bulk: batch cancelled"));
+	_api.request(base::take(_requestId)).cancel();
+	_pager = nullptr;
+	_pending.clear();
+	_requested.clear();
+	finish();
+}
+
+rpl::producer<DownloadBatch::State> DownloadBatch::stateValue() const {
+	return _state.value();
+}
+
+rpl::lifetime &DownloadBatch::lifetime() {
+	return _lifetime;
+}
+
+void DownloadBatch::queue(MatchedPost post) {
+	if (_queued.emplace(post.msgId).second) {
+		_pending.push_back(post);
+	}
+}
+
+void DownloadBatch::processNext() {
+	if (_requestId || _finished) {
+		pushState();
+		return;
+	}
+	auto ids = std::vector<int64>();
+	while (!_pending.empty()) {
+		const auto post = _pending.front();
+		const auto neighbors = post.groupId
+			? AlbumNeighborIds(
+				std::vector<std::vector<int64>>{ { post.msgId } },
+				[&](int64 id) { return lookup(id) != nullptr; })
+			: std::vector<int64>();
+		if (int(ids.size() + neighbors.size()) > kIdsPerRequest) {
+			break;
+		}
+		_pending.erase(begin(_pending));
+		if (neighbors.empty()) {
+			addPost(post);
+			continue;
+		}
+		ids.insert(end(ids), begin(neighbors), end(neighbors));
+		_requested.push_back(post);
+	}
+	if (ids.empty()) {
+		checkFinished();
+		return;
+	}
+	auto inputs = QVector<MTPInputMessage>();
+	inputs.reserve(ids.size());
+	for (const auto id : ids) {
+		inputs.push_back(MTP_inputMessageID(MTP_int(id)));
+	}
+	const auto added = [=] {
+		_requestId = 0;
+		for (const auto &post : base::take(_requested)) {
+			addPost(post);
+		}
+		processNext();
+	};
+	_requestId = _api.request(MTPchannels_GetMessages(
+		_channel->inputChannel(),
+		MTP_vector<MTPInputMessage>(inputs)
+	)).done([=](const MTPmessages_Messages &result) {
+		_channel->owner().processExistingMessages(_channel, result);
+		added();
+	}).fail([=] {
+		LOG(("AyuGram bulk: album chunk failed"));
+		// A failed chunk only means fewer album items, keep going.
+		added();
+	}).send();
+	pushState();
+}
+
+void DownloadBatch::addPost(MatchedPost post) {
+	++_processed;
+	if (post.groupId && !_doneGroups.emplace(post.groupId).second) {
+		return;
+	}
+	auto candidates = std::vector<Candidate>();
+	const auto add = [&](not_null<HistoryItem*> item) {
+		const auto video = VideoOf(item);
+		const auto photo = video ? nullptr : PhotoOf(item);
+		candidates.push_back({
+			.msgId = item->id.bare,
+			.groupId = item->groupId().value,
+			.documentId = video ? uint64(video->id) : uint64(0),
+			.isVideo = (video != nullptr),
+			.skip = video && SkipVideo(video),
+			.photoId = photo ? uint64(photo->id) : uint64(0),
+		});
+	};
+	const auto range = post.groupId
+		? AlbumIdRange({ post.msgId })
+		: IdRange{ post.msgId, post.msgId };
+	for (auto id = range.from; id <= range.till; ++id) {
+		if (const auto item = lookup(id)) {
+			add(item);
+		}
+	}
+	const auto selection = SelectMedia({ post }, candidates, _includePhotos);
+	if (_folder.isEmpty()) {
+		return;
+	}
+	const auto peerId = _channel->id;
+	auto videoPaths = std::map<int64, QString>();
+	for (const auto id : selection.videos) {
+		const auto item = lookup(id);
+		const auto video = item ? VideoOf(item) : nullptr;
+		if (!video || video->loading()) {
+			continue;
+		}
+		const auto path = SaveVideoAndTrack(
+			FullMsgId(peerId, MsgId(id)),
+			video,
+			_folder,
+			_reservation);
+		if (!path.isEmpty()) {
+			videoPaths.emplace(id, path);
+			++_videos;
+		}
+	}
+	for (const auto &pick : selection.photos) {
+		const auto i = videoPaths.find(pick.videoMsgId);
+		const auto item = lookup(pick.msgId);
+		const auto photo = item ? PhotoOf(item) : nullptr;
+		if (i == videoPaths.end() || !photo) {
+			continue;
+		}
+		const auto parts = SplitPath(
+			PhotoPathForVideo(i->second, u".jpg"_q));
+		PhotoSaverFor(&_channel->session())->add(
+			FullMsgId(peerId, MsgId(pick.msgId)),
+			photo,
+			ReserveName(
+				_reservation,
+				parts.base,
+				parts.extension,
+				FileExists));
+		++_photos;
+	}
+}
+
+void DownloadBatch::checkFinished() {
+	if (!_finished
+		&& !_requestId
+		&& _pending.empty()
+		&& !(_pager && _pager->loading())) {
+		finish();
+	} else {
+		pushState();
+	}
+}
+
+void DownloadBatch::finish() {
+	_finished = true;
+	pushState();
+	LOG(("AyuGram bulk: batch finished: %1 videos, %2 photos, %3 failed"
+		).arg(_videos
+		).arg(_photos
+		).arg(_failedPosts));
+	if (const auto window = _channel->session().tryResolveWindow(_channel)) {
+		window->showToast(AddedText(
+			_videos,
+			_photos,
+			_includePhotos,
+			_failedPosts,
+			_pageFailed));
+	}
+	// We may be inside an MTP handler of our own sender, destroy later.
+	const auto session = &_channel->session();
+	crl::on_main(this, [=] {
+		DestroyBatch(this, session);
+	});
+}
+
+void DownloadBatch::pushState() {
+	const auto pagingLeft = (_pager && _pager->loading())
+		? std::max(_pager->progress().total - _pager->progress().scanned, 0)
+		: 0;
+	_state = State{
+		.added = _videos + _photos,
+		.progress = _finished
+			? 1.
+			: ProgressRatio({
+				.scanned = _processed,
+				.total = int(_queued.size()) + pagingLeft,
+			}),
+	};
+}
+
+HistoryItem *DownloadBatch::lookup(int64 id) const {
+	return _channel->owner().message(_channel, MsgId(id));
+}
+
 SearchSelection::SearchSelection(
 	not_null<ChannelData*> channel,
 	QString query,
@@ -333,16 +719,15 @@ SearchSelection::SearchSelection(
 : _channel(channel)
 , _query(std::move(query))
 , _shownResults(std::move(shownResults))
-, _repaint(std::move(repaint))
-, _api(&channel->session().mtp()) {
+, _repaint(std::move(repaint)) {
 }
 
 SearchSelection::~SearchSelection() = default;
 
 bool SearchSelection::toggle(not_null<const HistoryItem*> item) {
-	if (item->history()->peer != _channel) {
+	if (item->history()->peer != _channel || _adding) {
 		return false;
-	} else if (_ready || _closing) {
+	} else if (_closing) {
 		return true;
 	}
 	_selection.toggle({
@@ -355,7 +740,7 @@ bool SearchSelection::toggle(not_null<const HistoryItem*> item) {
 }
 
 void SearchSelection::selectAll() {
-	if (_ready || _closing) {
+	if (_adding || _closing) {
 		return;
 	}
 	_selection.forgetUnticked();
@@ -371,28 +756,64 @@ void SearchSelection::selectAll() {
 	for (const auto &post : _found) {
 		_selection.addFound(post);
 	}
-	if (!_foundAll && !_loading) {
+	if (!_foundAll && !_pager) {
 		LOG(("AyuGram bulk: select all started"));
 		_found.clear();
-		_offsetId = 0;
-		_progress = SearchProgress();
-		_loading = true;
-		requestPage();
+		_pager = std::make_unique<SearchPager>(_channel, _query);
+		_pager->start({
+			.page = [=](std::vector<MatchedPost> found) {
+				for (const auto &post : found) {
+					_found.push_back(post);
+					_selection.addFound(post);
+				}
+				pushState();
+				_repaint();
+			},
+			.done = [=](bool failed) {
+				_foundAll = !failed;
+				// We're inside a handler of the pager, destroy later.
+				crl::on_main(this, [=] {
+					if (_pager && !_pager->loading()) {
+						_pager = nullptr;
+						pushState();
+					}
+				});
+			},
+		});
 	}
 	pushState();
 	_repaint();
 }
 
-void SearchSelection::prepareDownload(Fn<void(DownloadSet)> ready) {
-	if (_ready || _closing) {
+void SearchSelection::startDownload(
+		bool includePhotos,
+		const QString &folder) {
+	if (_adding || _closing) {
 		return;
 	}
-	_ready = std::move(ready);
-	if (_loading) {
+	auto pager = (_pager && _pager->loading())
+		? std::move(_pager)
+		: nullptr;
+	_pager = nullptr;
+	const auto batch = DownloadBatch::Start(
+		_channel,
+		_selection,
+		std::move(pager),
+		includePhotos,
+		folder);
+	_batch = batch;
+	_adding = true;
+	_checks.clear();
+	batch->stateValue(
+	) | rpl::on_next([=](const DownloadBatch::State &state) {
+		_batchState = state;
 		pushState();
-	} else {
-		requestAlbums();
-	}
+	}, _lifetime);
+	batch->lifetime().add(crl::guard(this, [=] {
+		_batch = nullptr;
+		close();
+	}));
+	_repaint();
 }
 
 void SearchSelection::close() {
@@ -400,34 +821,17 @@ void SearchSelection::close() {
 		return;
 	}
 	_closing = true;
-	_api.request(base::take(_requestId)).cancel();
-	_loading = false;
-	_ready = nullptr;
+	_pager = nullptr;
+	if (const auto batch = _batch.get()) {
+		batch->cancel();
+	}
 	_closeRequests.fire({});
 }
 
-void SearchSelection::requestAlbums() {
-	auto byGroup = std::map<uint64, std::vector<int64>>();
-	for (const auto &post : _selection.posts()) {
-		if (post.groupId) {
-			byGroup[post.groupId].push_back(post.msgId);
-		}
-	}
-	auto albums = std::vector<std::vector<int64>>();
-	albums.reserve(byGroup.size());
-	for (auto &[groupId, members] : byGroup) {
-		albums.push_back(std::move(members));
-	}
-	const auto neighbors = AlbumNeighborIds(albums, [&](int64 id) {
-		return lookup(id) != nullptr;
-	});
-	_chunks = ChunkIds(neighbors);
-	_chunkIndex = 0;
-	LOG(("AyuGram bulk: album phase: %1 ids, %2 chunks"
-		).arg(int(neighbors.size())
-		).arg(int(_chunks.size())));
-	pushState();
-	requestNextChunk();
+std::optional<int> SearchSelection::finalCount() const {
+	return (_pager && _pager->loading())
+		? std::nullopt
+		: std::make_optional(_selection.count());
 }
 
 void SearchSelection::paintCheck(
@@ -435,7 +839,7 @@ void SearchSelection::paintCheck(
 		not_null<const HistoryItem*> item,
 		const style::DialogRow &st,
 		int outerWidth) {
-	if (item->history()->peer != _channel) {
+	if (item->history()->peer != _channel || _adding) {
 		return;
 	}
 	const auto checked = _selection.contains(item->id.bare);
@@ -472,221 +876,19 @@ rpl::lifetime &SearchSelection::lifetime() {
 	return _lifetime;
 }
 
-void SearchSelection::requestPage() {
-	// Flood waits are delayed and retried by the MTP layer, as usual.
-	_requestId = _api.request(MTPmessages_Search(
-		MTP_flags(0),
-		_channel->input(),
-		MTP_string(_query),
-		MTP_inputPeerEmpty(), // from_id
-		MTPInputPeer(), // saved_peer_id
-		MTPVector<MTPReaction>(), // saved_reaction
-		MTP_int(0), // top_msg_id
-		MTP_inputMessagesFilterPhotoVideo(),
-		MTP_int(0), // min_date
-		MTP_int(0), // max_date
-		MTP_int(_offsetId.bare),
-		MTP_int(0), // add_offset
-		MTP_int(kSearchPerPage),
-		MTP_int(0), // max_id
-		MTP_int(0), // min_id
-		MTP_long(0) // hash
-	)).done([=](const MTPmessages_Messages &result) {
-		_requestId = 0;
-		pageReceived(result);
-	}).fail([=](const MTP::Error &error) {
-		_requestId = 0;
-		LOG(("AyuGram bulk: search page failed: %1").arg(error.type()));
-		pageFailed();
-	}).send();
-}
-
-void SearchSelection::pageFailed() {
-	// Keep what was found so far.
-	_partial = true;
-	pagingFinished();
-}
-
-void SearchSelection::pagingFinished() {
-	_loading = false;
-	if (_ready) {
-		requestAlbums();
-	} else {
-		pushState();
-	}
-	_repaint();
-}
-
-void SearchSelection::pageReceived(const MTPmessages_Messages &result) {
-	auto &owner = _channel->owner();
-	owner.processExistingMessages(_channel, result);
-
-	const auto list = MessagesFrom(result);
-	auto minId = MsgId();
-	auto received = 0;
-	if (list) {
-		for (const auto &message : *list) {
-			const auto id = IdFromMessage(message);
-			if (!id) {
-				continue;
-			}
-			++received;
-			if (!minId || id < minId) {
-				minId = id;
-			}
-			if (const auto item = owner.message(_channel, id)) {
-				const auto post = MatchedPost{
-					.msgId = id.bare,
-					.groupId = item->groupId().value,
-				};
-				_found.push_back(post);
-				_selection.addFound(post);
-			}
-		}
-	}
-	_progress.scanned += received;
-	_progress.total = std::max(_progress.total, TotalFrom(result));
-	LOG(("AyuGram bulk: page received: %1 received, %2 scanned, %3 total"
-		).arg(received
-		).arg(_progress.scanned
-		).arg(_progress.total));
-
-	const auto complete = !list
-		|| (result.type() == mtpc_messages_messages)
-		|| SearchPagingDone(received, _progress.scanned, _progress.total)
-		|| (_offsetId && minId >= _offsetId);
-	if (complete) {
-		LOG(("AyuGram bulk: paging done"));
-		_foundAll = true;
-		_partial = false;
-		pagingFinished();
-	} else {
-		_offsetId = minId;
-		requestPage();
-		pushState();
-		_repaint();
-	}
-}
-
-void SearchSelection::requestNextChunk() {
-	if (_chunkIndex >= int(_chunks.size())) {
-		finishPreparing();
-		return;
-	}
-	const auto index = _chunkIndex++;
-	auto ids = QVector<MTPInputMessage>();
-	for (const auto id : _chunks[index]) {
-		ids.push_back(MTP_inputMessageID(MTP_int(id)));
-	}
-	_requestId = _api.request(MTPchannels_GetMessages(
-		_channel->inputChannel(),
-		MTP_vector<MTPInputMessage>(ids)
-	)).done([=](const MTPmessages_Messages &result) {
-		_requestId = 0;
-		_channel->owner().processExistingMessages(_channel, result);
-		pushState();
-		requestNextChunk();
-	}).fail([=] {
-		_requestId = 0;
-		LOG(("AyuGram bulk: chunk %1 failed").arg(index));
-		// A failed chunk only means fewer album items, keep going.
-		requestNextChunk();
-	}).send();
-}
-
-void SearchSelection::finishPreparing() {
-	auto set = collect();
-	LOG(("AyuGram bulk: prepared: %1 videos, %2 photos, partial: %3"
-		).arg(int(set.videos.size())
-		).arg(int(set.photos.size())
-		).arg(Logs::b(set.partial)));
-	const auto ready = base::take(_ready);
-	pushState();
-	ready(std::move(set));
-}
-
 void SearchSelection::pushState() {
-	const auto preparing = (_ready != nullptr);
+	const auto loading = _pager && _pager->loading();
 	_state = State{
 		.count = _selection.count(),
-		.loading = _loading,
-		.preparing = preparing,
-		.progress = _loading
-			? ProgressRatio(_progress)
-			: preparing
-			? ProgressRatio({
-				.scanned = _chunkIndex,
-				.total = int(_chunks.size()),
-			})
+		.loading = loading,
+		.adding = _adding,
+		.added = _batchState.added,
+		.progress = _adding
+			? _batchState.progress
+			: loading
+			? ProgressRatio(_pager->progress())
 			: 0.,
 	};
-}
-
-HistoryItem *SearchSelection::lookup(int64 id) const {
-	return _channel->owner().message(_channel, MsgId(id));
-}
-
-DownloadSet SearchSelection::collect() const {
-	const auto posts = _selection.posts();
-	auto candidates = std::vector<Candidate>();
-	const auto add = [&](not_null<HistoryItem*> item) {
-		const auto video = VideoOf(item);
-		const auto photo = video ? nullptr : PhotoOf(item);
-		candidates.push_back({
-			.msgId = item->id.bare,
-			.groupId = item->groupId().value,
-			.documentId = video ? uint64(video->id) : uint64(0),
-			.isVideo = (video != nullptr),
-			.skip = video && SkipVideo(video),
-			.photoId = photo ? uint64(photo->id) : uint64(0),
-		});
-	};
-	auto byGroup = std::map<uint64, std::vector<int64>>();
-	for (const auto &post : posts) {
-		if (post.groupId) {
-			byGroup[post.groupId].push_back(post.msgId);
-		} else if (const auto item = lookup(post.msgId)) {
-			add(item);
-		}
-	}
-	for (const auto &[groupId, members] : byGroup) {
-		const auto range = AlbumIdRange(members);
-		for (auto id = range.from; id <= range.till; ++id) {
-			if (const auto item = lookup(id)) {
-				add(item);
-			}
-		}
-	}
-	const auto selection = SelectMedia(posts, candidates, true);
-
-	const auto peerId = _channel->id;
-	auto result = DownloadSet{
-		.channel = _channel,
-		.partial = _partial,
-	};
-	for (const auto id : selection.videos) {
-		result.videos.push_back(FullMsgId(peerId, MsgId(id)));
-		if (const auto item = lookup(id)) {
-			if (const auto video = VideoOf(item)) {
-				result.videosSize += video->size;
-			}
-		}
-	}
-	for (const auto &pick : selection.photos) {
-		result.photos.push_back({
-			.photo = FullMsgId(peerId, MsgId(pick.msgId)),
-			.video = FullMsgId(peerId, MsgId(pick.videoMsgId)),
-		});
-		if (const auto item = lookup(pick.msgId)) {
-			if (const auto photo = PhotoOf(item)) {
-				// Unknown sizes (0) are left out of the total.
-				result.photosSize += std::max(
-					photo->imageByteSize(Data::PhotoSize::Large),
-					0);
-			}
-		}
-	}
-	return result;
 }
 
 } // namespace AyuBulkDownload
