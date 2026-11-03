@@ -12,6 +12,7 @@
 #include "data/data_msg_id.h"
 #include "mtproto/sender.h"
 
+#include <deque>
 #include <optional>
 
 class ChannelData;
@@ -97,7 +98,8 @@ public:
 		PostSelection selection,
 		std::unique_ptr<SearchPager> pager,
 		bool includePhotos,
-		QString folder);
+		QString folder,
+		not_null<NameReservation*> reservation);
 	~DownloadBatch();
 
 	// `pager` keeps feeding the batch while it is loading.
@@ -117,7 +119,8 @@ public:
 private:
 	void queue(MatchedPost post);
 	void processNext();
-	void addPost(MatchedPost post);
+	// Returns whether the known items of the post have a video.
+	bool addPost(MatchedPost post);
 	void checkFinished();
 	void finish();
 	void pushState();
@@ -130,13 +133,16 @@ private:
 	MTP::Sender _api;
 	PostSelection _selection;
 	std::unique_ptr<SearchPager> _pager;
-	NameReservation _reservation;
+	const not_null<NameReservation*> _reservation; // Shared per folder.
 
-	std::vector<MatchedPost> _pending;
+	std::deque<MatchedPost> _pending;
 	std::vector<MatchedPost> _requested;
 	std::set<int64> _queued;
+	std::set<int64> _fetched; // Album neighbors were requested.
+	std::set<int64> _fetchFailed;
 	std::set<uint64> _doneGroups;
 	mtpRequestId _requestId = 0;
+	bool _scheduled = false;
 	int _processed = 0;
 	int _videos = 0;
 	int _photos = 0;

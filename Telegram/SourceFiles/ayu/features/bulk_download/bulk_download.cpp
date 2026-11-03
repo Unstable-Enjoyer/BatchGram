@@ -39,6 +39,9 @@ namespace {
 
 using MessagesList = QVector<MTPMessage>;
 
+constexpr auto kPostsPerSlice = 50;
+constexpr auto kSliceDuration = crl::time(8);
+
 // Photos load into memory first (as in upstream "Save selected files"),
 // then are written to their reserved path and added to the Downloads.
 class PhotoSaver final {
@@ -68,6 +71,7 @@ private:
 };
 
 struct AccountData {
+	std::map<QString, NameReservation> reservations; // By folder.
 	std::unique_ptr<PhotoSaver> photos;
 	std::vector<std::unique_ptr<DownloadBatch>> batches;
 };
@@ -279,6 +283,18 @@ void PhotoSaver::check() {
 	}
 }
 
+// Unlike Session::tryResolveWindow() it never activates the account.
+[[nodiscard]] Window::SessionController *ExistingWindow(
+		not_null<Main::Session*> session) {
+	auto result = (Window::SessionController*)nullptr;
+	for (const auto &window : session->windows()) {
+		if (!result || window->isPrimary()) {
+			result = window;
+		}
+	}
+	return result;
+}
+
 [[nodiscard]] QString AddedText(
 		int videos,
 		int photos,
@@ -440,13 +456,15 @@ DownloadBatch::DownloadBatch(
 	PostSelection selection,
 	std::unique_ptr<SearchPager> pager,
 	bool includePhotos,
-	QString folder)
+	QString folder,
+	not_null<NameReservation*> reservation)
 : _channel(channel)
 , _includePhotos(includePhotos)
 , _folder(std::move(folder))
 , _api(&channel->session().mtp())
 , _selection(std::move(selection))
-, _pager(std::move(pager)) {
+, _pager(std::move(pager))
+, _reservation(reservation) {
 }
 
 DownloadBatch::~DownloadBatch() = default;
@@ -468,13 +486,15 @@ not_null<DownloadBatch*> DownloadBatch::Start(
 		QDir().mkpath(target);
 	}
 	const auto posts = selection.posts();
-	auto &batches = Account(session).batches;
+	auto &account = Account(session);
+	auto &batches = account.batches;
 	batches.push_back(std::make_unique<DownloadBatch>(
 		channel,
 		std::move(selection),
 		std::move(pager),
 		includePhotos,
-		target));
+		target,
+		&account.reservations[target]));
 	const auto result = batches.back().get();
 	LOG(("AyuGram bulk: batch started: %1 posts, paging: %2"
 		).arg(int(posts.size())
@@ -537,14 +557,28 @@ void DownloadBatch::queue(MatchedPost post) {
 }
 
 void DownloadBatch::processNext() {
-	if (_requestId || _finished) {
+	if (_requestId || _finished || _scheduled) {
 		pushState();
 		return;
 	}
+	// WHY: saving thousands of posts in one turn freezes the window and
+	// the progress line, so the work is split into short slices.
+	const auto started = crl::now();
 	auto ids = std::vector<int64>();
+	auto added = 0;
 	while (!_pending.empty()) {
+		if (added >= kPostsPerSlice
+			|| crl::now() - started >= kSliceDuration) {
+			_scheduled = true;
+			crl::on_main(this, [=] {
+				_scheduled = false;
+				processNext();
+			});
+			pushState();
+			return;
+		}
 		const auto post = _pending.front();
-		const auto neighbors = post.groupId
+		const auto neighbors = (post.groupId && !_fetched.contains(post.msgId))
 			? AlbumNeighborIds(
 				std::vector<std::vector<int64>>{ { post.msgId } },
 				[&](int64 id) { return lookup(id) != nullptr; })
@@ -552,9 +586,13 @@ void DownloadBatch::processNext() {
 		if (int(ids.size() + neighbors.size()) > kIdsPerRequest) {
 			break;
 		}
-		_pending.erase(begin(_pending));
+		_pending.pop_front();
 		if (neighbors.empty()) {
-			addPost(post);
+			const auto hasVideo = addPost(post);
+			if (!hasVideo && _fetchFailed.contains(post.msgId)) {
+				++_failedPosts;
+			}
+			++added;
 			continue;
 		}
 		ids.insert(end(ids), begin(neighbors), end(neighbors));
@@ -569,10 +607,16 @@ void DownloadBatch::processNext() {
 	for (const auto id : ids) {
 		inputs.push_back(MTP_inputMessageID(MTP_int(id)));
 	}
-	const auto added = [=] {
+	// Fetched posts go back to the queue, to be added in slices.
+	const auto fetched = [=](bool failed) {
 		_requestId = 0;
-		for (const auto &post : base::take(_requested)) {
-			addPost(post);
+		auto requested = base::take(_requested);
+		for (auto i = rbegin(requested); i != rend(requested); ++i) {
+			_fetched.emplace(i->msgId);
+			if (failed) {
+				_fetchFailed.emplace(i->msgId);
+			}
+			_pending.push_front(*i);
 		}
 		processNext();
 	};
@@ -581,19 +625,18 @@ void DownloadBatch::processNext() {
 		MTP_vector<MTPInputMessage>(inputs)
 	)).done([=](const MTPmessages_Messages &result) {
 		_channel->owner().processExistingMessages(_channel, result);
-		added();
+		fetched(false);
 	}).fail([=] {
 		LOG(("AyuGram bulk: album chunk failed"));
-		// A failed chunk only means fewer album items, keep going.
-		added();
+		fetched(true);
 	}).send();
 	pushState();
 }
 
-void DownloadBatch::addPost(MatchedPost post) {
+bool DownloadBatch::addPost(MatchedPost post) {
 	++_processed;
 	if (post.groupId && !_doneGroups.emplace(post.groupId).second) {
-		return;
+		return true;
 	}
 	auto candidates = std::vector<Candidate>();
 	const auto add = [&](not_null<HistoryItem*> item) {
@@ -616,9 +659,12 @@ void DownloadBatch::addPost(MatchedPost post) {
 			add(item);
 		}
 	}
+	const auto hasVideo = ranges::any_of(candidates, [](const Candidate &c) {
+		return c.isVideo;
+	});
 	const auto selection = SelectMedia({ post }, candidates, _includePhotos);
 	if (_folder.isEmpty()) {
-		return;
+		return hasVideo;
 	}
 	const auto peerId = _channel->id;
 	auto videoPaths = std::map<int64, QString>();
@@ -632,7 +678,7 @@ void DownloadBatch::addPost(MatchedPost post) {
 			FullMsgId(peerId, MsgId(id)),
 			video,
 			_folder,
-			_reservation);
+			*_reservation);
 		if (!path.isEmpty()) {
 			videoPaths.emplace(id, path);
 			++_videos;
@@ -651,12 +697,13 @@ void DownloadBatch::addPost(MatchedPost post) {
 			FullMsgId(peerId, MsgId(pick.msgId)),
 			photo,
 			ReserveName(
-				_reservation,
+				*_reservation,
 				parts.base,
 				parts.extension,
 				FileExists));
 		++_photos;
 	}
+	return hasVideo;
 }
 
 void DownloadBatch::checkFinished() {
@@ -677,7 +724,7 @@ void DownloadBatch::finish() {
 		).arg(_videos
 		).arg(_photos
 		).arg(_failedPosts));
-	if (const auto window = _channel->session().tryResolveWindow(_channel)) {
+	if (const auto window = ExistingWindow(&_channel->session())) {
 		window->showToast(AddedText(
 			_videos,
 			_photos,

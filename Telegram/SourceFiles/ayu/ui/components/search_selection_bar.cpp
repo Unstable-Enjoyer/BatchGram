@@ -116,18 +116,23 @@ void ShowSelectionBar(
 		progress->entity()->setValue(state.progress);
 	}, bar->lifetime());
 
+	// Same as Info::TopBar::updateSelectionControlsGeometry(), the label
+	// takes the width of the hidden buttons.
 	rpl::combine(
 		parent->sizeValue(),
-		label->entity()->naturalWidthValue()
-	) | rpl::on_next([=](QSize size, int) {
+		label->entity()->naturalWidthValue(),
+		selection->stateValue()
+	) | rpl::on_next([=](QSize size, int, const SearchSelection::State &) {
 		const auto width = size.width();
 		bar->resize(size);
 		outer->moveToLeft(0, 0);
 		auto right = st.mediaActionsSkip;
-		download->moveToRight(right, 0, width);
-		right += download->width();
-		selectAll->moveToRight(right, 0, width);
-		right += selectAll->width();
+		for (const auto button : { download, selectAll }) {
+			if (button->toggled()) {
+				button->moveToRight(right, 0, width);
+				right += button->width();
+			}
+		}
 		cancel->moveToLeft(0, 0, width);
 		const auto left = cancel->width();
 		label->resizeToNaturalWidth(std::max(width - left - right, 0));
