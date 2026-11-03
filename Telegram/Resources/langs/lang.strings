@@ -9202,4 +9202,3 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "ayu_DownloadVideosChangeFolder" = "Change";
 "ayu_DownloadVideosIncludePhotos" = "Include photos";
 "ayu_DownloadVideosNotFound" = "No videos found.";
-"ayu_DownloadVideosFailed" = "Could not search for videos. Please try again later.";

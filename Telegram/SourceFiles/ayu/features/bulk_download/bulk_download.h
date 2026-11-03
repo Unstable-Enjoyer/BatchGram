@@ -7,6 +7,7 @@
 #pragma once
 
 #include "ayu/features/bulk_download/bulk_download_logic.h"
+#include "base/flat_map.h"
 #include "base/weak_ptr.h"
 #include "data/data_msg_id.h"
 #include "mtproto/sender.h"
@@ -18,6 +19,18 @@ namespace Main {
 class Session;
 } // namespace Main
 
+namespace Dialogs {
+struct SearchState;
+} // namespace Dialogs
+
+namespace style {
+struct DialogRow;
+} // namespace style
+
+namespace Ui {
+class RoundCheckbox;
+} // namespace Ui
+
 namespace AyuBulkDownload {
 
 struct PhotoItem {
@@ -25,14 +38,14 @@ struct PhotoItem {
 	FullMsgId video; // Its file name is reused for the photo.
 };
 
-// What a finished search found, shown in the confirm box.
-struct SearchOutcome {
+// The media of the selected posts, shown in the download confirm.
+struct DownloadSet {
 	ChannelData *channel = nullptr;
 	std::vector<FullMsgId> videos;
-	std::vector<PhotoItem> photos;
-	int64 size = 0; // Videos plus photos with a known byte size.
-	bool partial = false; // A search page failed after some results.
-	bool failed = false; // The first search page failed.
+	std::vector<PhotoItem> photos; // Photos of the posts with a video.
+	int64 videosSize = 0;
+	int64 photosSize = 0; // Photos with a known byte size.
+	bool partial = false; // "Select all" stopped before the end.
 };
 
 // Where a batch goes by default: the download path setting, resolved
@@ -40,76 +53,96 @@ struct SearchOutcome {
 [[nodiscard]] QString DefaultDownloadFolder(
 	not_null<Main::Session*> session);
 
-// Saves the found media to `folder` (the default one when empty), with a
-// per-batch name reservation and no file dialog, even with "Ask download
-// path" enabled. Videos are tracked in the Downloads manager while they
-// load; photos are added there when saved.
+// Saves the videos (and the photos, with includePhotos) to `folder` (the
+// default one when empty), with a per-batch name reservation and no file
+// dialog, even with "Ask download path" enabled. Videos are tracked in the
+// Downloads manager while they load; photos are added there when saved.
 void StartDownloads(
 	not_null<Main::Session*> session,
-	const SearchOutcome &outcome,
+	const DownloadSet &set,
+	bool includePhotos,
 	const QString &folder);
 
-// Finds videos (and optionally photos) of the posts that match the query
-// using server-side messages.search, then loads the full albums of matched
-// posts. Channels and supergroups only: album neighbors are found by
+// The channel of an in-chat search whose found posts can be selected,
+// or nullptr. Channels and supergroups only: album neighbors are found by
 // adjacent message ids, which are per-chat only there.
-//
-// One search per account. It is owned by the account (Main::Session), not
-// by any box: it survives closing the dialog, and it is destroyed when it
-// finishes, when it is stopped, or when the session is destroyed.
-// Destroying it cancels all pending requests and ends lifetime().
-class VideoSearch final : public base::has_weak_ptr {
+[[nodiscard]] ChannelData *SelectableSearchChannel(
+	const Dialogs::SearchState &state);
+
+// Posts picked in the in-chat search results of a channel. "Select all"
+// pages through messages.search for the same query in the background.
+class SearchSelection final : public base::has_weak_ptr {
 public:
-	VideoSearch(
+	struct State {
+		int count = 0;
+		bool loading = false; // "Select all" is paging.
+		bool preparing = false; // Albums are loading for the download.
+		float64 progress = 0.;
+
+		friend inline bool operator==(const State &, const State &)
+			= default;
+	};
+
+	SearchSelection(
 		not_null<ChannelData*> channel,
-		Query query,
-		bool includePhotos);
-	~VideoSearch();
+		QString query,
+		Fn<std::vector<not_null<HistoryItem*>>()> shownResults,
+		Fn<void()> repaint);
+	~SearchSelection();
 
-	// The running search of the account, if any.
-	[[nodiscard]] static VideoSearch *Find(not_null<Main::Session*> session);
-
-	// Starts a search unless one is already running for the account,
-	// returns the running one.
-	static not_null<VideoSearch*> Start(
-		not_null<ChannelData*> channel,
-		Query query,
-		bool includePhotos);
-
-	// Cancels the search and destroys it. Nothing is shown afterwards.
+	[[nodiscard]] bool contains(not_null<const HistoryItem*> item) const;
+	// Returns false for messages of other chats, they are never selected.
+	bool toggle(not_null<const HistoryItem*> item);
+	void selectAll();
+	// Stops "Select all" (keeping what it found) or the download preparing.
 	void stop();
+	void prepareDownload(Fn<void(DownloadSet)> ready);
+	void close();
 
-	[[nodiscard]] not_null<ChannelData*> channel() const;
-	[[nodiscard]] rpl::producer<SearchProgress> progressValue() const;
+	void paintCheck(
+		QPainter &p,
+		not_null<const HistoryItem*> item,
+		const style::DialogRow &st,
+		int outerWidth);
+
+	[[nodiscard]] rpl::producer<State> stateValue() const;
+	[[nodiscard]] rpl::producer<> closeRequests() const;
 	[[nodiscard]] rpl::lifetime &lifetime();
 
 private:
 	void requestPage();
 	void pageReceived(const MTPmessages_Messages &result);
 	void pageFailed();
-	void requestAlbums();
 	void requestNextChunk();
-	void updateProgress();
-	void finish();
+	void finishPreparing();
+	void pushState();
 
 	[[nodiscard]] HistoryItem *lookup(int64 id) const;
-	[[nodiscard]] std::vector<std::vector<int64>> albums() const;
-	// checkFiles: also skip already downloaded videos (stats files).
-	[[nodiscard]] MediaSelection select(bool checkFiles) const;
+	[[nodiscard]] DownloadSet collect() const;
 
 	const not_null<ChannelData*> _channel;
-	const Query _query;
-	const bool _includePhotos = false;
+	const QString _query;
+	const Fn<std::vector<not_null<HistoryItem*>>()> _shownResults;
+	const Fn<void()> _repaint;
 	MTP::Sender _api;
 
+	PostSelection _selection;
+	base::flat_map<MsgId, std::unique_ptr<Ui::RoundCheckbox>> _checks;
+
+	mtpRequestId _requestId = 0;
 	MsgId _offsetId = 0;
-	std::vector<MatchedPost> _posts;
+	SearchProgress _progress;
+	std::vector<MatchedPost> _found;
+	bool _foundAll = false;
+	bool _loading = false;
+	bool _partial = false;
+
 	std::vector<std::vector<int64>> _chunks;
 	int _chunkIndex = 0;
-	bool _failed = false;
-	bool _finished = false;
+	Fn<void(DownloadSet)> _ready;
 
-	rpl::variable<SearchProgress> _progress;
+	rpl::variable<State> _state;
+	rpl::event_stream<> _closeRequests;
 	rpl::lifetime _lifetime;
 
 };

@@ -9,10 +9,7 @@
 // Built only with -DAYU_BULK_DOWNLOAD_TESTS=ON (target ayu_bulk_download_tests).
 #include "ayu/features/bulk_download/bulk_download_logic.h"
 
-#include <QDate>
-#include <QDateTime>
 #include <QString>
-#include <QTime>
 
 #include <algorithm>
 #include <cstdio>
@@ -30,139 +27,6 @@ int gFailed = 0;
 		std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #__VA_ARGS__); \
 	} \
 } while (false)
-
-// Expected local-time bounds, computed with QDateTime, not hardcoded epochs.
-TimeId LocalStartOfDay(QDate day) {
-	return TimeId(QDateTime(day, QTime(0, 0)).toSecsSinceEpoch());
-}
-
-TimeId LocalLastSecondOfDay(QDate day) {
-	return TimeId(QDateTime(day, QTime(23, 59, 59)).toSecsSinceEpoch());
-}
-
-void TestPrepareQueryTrimsAndLowercases() {
-	const auto q = PrepareQuery(
-		QStringLiteral("  Hello World  "),
-		QString(),
-		QDate(),
-		QDate());
-	CHECK(q.phrase == QStringLiteral("hello world"));
-	CHECK(q.hashtag.isEmpty());
-}
-
-void TestPrepareQueryHashtag() {
-	const auto add = [](const QString &tag) {
-		return PrepareQuery(QString(), tag, QDate(), QDate()).hashtag;
-	};
-	CHECK(add(QStringLiteral("TagX")) == QStringLiteral("#tagx"));
-	CHECK(add(QStringLiteral("  #Tag  ")) == QStringLiteral("#tag"));
-	CHECK(add(QStringLiteral("#")).isEmpty());
-	CHECK(add(QStringLiteral("   ")).isEmpty());
-}
-
-void TestPrepareQueryDateBounds() {
-	const auto from = QDate(2024, 1, 10);
-	const auto till = QDate(2024, 1, 12);
-	const auto q = PrepareQuery(QString(), QString(), from, till);
-	CHECK(q.minDate == LocalStartOfDay(from));
-	CHECK(q.maxDate == LocalLastSecondOfDay(till));
-
-	const auto open = PrepareQuery(QString(), QString(), QDate(), QDate());
-	CHECK(open.minDate == 0);
-	CHECK(open.maxDate == 0);
-}
-
-void TestSearchText() {
-	auto q = Query();
-	q.phrase = QStringLiteral("hello");
-	q.hashtag = QStringLiteral("#tag");
-	CHECK(SearchText(q) == QStringLiteral("hello #tag"));
-
-	auto phraseOnly = Query();
-	phraseOnly.phrase = QStringLiteral("hello");
-	CHECK(SearchText(phraseOnly) == QStringLiteral("hello"));
-
-	auto hashtagOnly = Query();
-	hashtagOnly.hashtag = QStringLiteral("#tag");
-	CHECK(SearchText(hashtagOnly) == QStringLiteral("#tag"));
-}
-
-void TestServerMinDate() {
-	auto q = Query();
-	q.minDate = 1000;
-	CHECK(ServerMinDate(q) == 999);
-	CHECK(ServerMinDate(Query()) == 0);
-}
-
-void TestServerMaxDate() {
-	auto q = Query();
-	q.maxDate = 2000;
-	CHECK(ServerMaxDate(q) == 2001);
-	CHECK(ServerMaxDate(Query()) == 0);
-}
-
-void TestMatchesPhraseOnly() {
-	const auto q = PrepareQuery(
-		QStringLiteral("hello"),
-		QString(),
-		QDate(),
-		QDate());
-	CHECK(Matches(q, QStringLiteral("say hello there"), 1000));
-	CHECK(!Matches(q, QStringLiteral("bye"), 1000));
-}
-
-void TestMatchesHashtagOnly() {
-	const auto q = PrepareQuery(
-		QString(),
-		QStringLiteral("tag"),
-		QDate(),
-		QDate());
-	CHECK(Matches(q, QStringLiteral("a #tag b"), 1000));
-	CHECK(!Matches(q, QStringLiteral("no tags here"), 1000));
-}
-
-void TestMatchesPhraseAndHashtag() {
-	const auto q = PrepareQuery(
-		QStringLiteral("hello"),
-		QStringLiteral("#tag"),
-		QDate(),
-		QDate());
-	CHECK(Matches(q, QStringLiteral("hello world #tag"), 1000));
-	CHECK(!Matches(q, QStringLiteral("hello only"), 1000));
-	CHECK(!Matches(q, QStringLiteral("#tag only"), 1000));
-}
-
-void TestMatchesEmptyQuery() {
-	const auto q = PrepareQuery(QString(), QString(), QDate(), QDate());
-	CHECK(Matches(q, QStringLiteral("anything"), 1000));
-	CHECK(Matches(q, QString(), 1000));
-}
-
-void TestMatchesCaseInsensitive() {
-	const auto q = PrepareQuery(
-		QStringLiteral("HeLLo"),
-		QStringLiteral("#TaG"),
-		QDate(),
-		QDate());
-	CHECK(Matches(q, QStringLiteral("SAY HELLO #tag"), 1000));
-}
-
-void TestMatchesDateBounds() {
-	const auto from = QDate(2024, 1, 10);
-	const auto till = QDate(2024, 1, 12);
-	const auto minDate = LocalStartOfDay(from);
-	const auto maxDate = LocalLastSecondOfDay(till);
-	const auto q = PrepareQuery(
-		QStringLiteral("hello"),
-		QString(),
-		from,
-		till);
-	const auto text = QStringLiteral("hello");
-	CHECK(Matches(q, text, minDate));
-	CHECK(Matches(q, text, maxDate));
-	CHECK(!Matches(q, text, minDate - 1));
-	CHECK(!Matches(q, text, maxDate + 1));
-}
 
 void TestAlbumIdRange() {
 	const auto empty = AlbumIdRange(std::vector<int64>());
@@ -396,16 +260,14 @@ void TestResolveDownloadFolder() {
 		== QStringLiteral("E:/Set/"));
 }
 
-void TestProgressRatioAndTotal() {
-	// Nothing scanned and total unknown: total 0, ratio 0.
+void TestProgressRatio() {
+	// Nothing scanned and total unknown: ratio 0.
 	auto progress = SearchProgress();
-	CHECK(ProgressTotal(progress) == 0);
 	CHECK(ProgressRatio(progress) == 0.);
 
-	// Scanned more than the server count: total follows scanned, ratio 1.
+	// Scanned more than the server count: ratio 1.
 	progress.scanned = 5;
 	progress.total = 3;
-	CHECK(ProgressTotal(progress) == 5);
 	CHECK(ProgressRatio(progress) == 1.);
 
 	progress.scanned = 50;
@@ -413,9 +275,41 @@ void TestProgressRatioAndTotal() {
 	CHECK(ProgressRatio(progress) == 0.25);
 }
 
-void TestIsPartialResult() {
-	CHECK(IsPartialResult(true, 5));
-	CHECK(!IsPartialResult(true, 0));
+void TestPostSelectionToggle() {
+	auto selection = PostSelection();
+	CHECK(selection.toggle({ .msgId = 7, .groupId = 3 }));
+	CHECK(selection.toggle({ .msgId = 5 }));
+	CHECK(selection.contains(7));
+	CHECK(selection.count() == 2);
+
+	const auto posts = selection.posts();
+	CHECK(posts.size() == 2);
+	CHECK(posts[0].msgId == 5 && posts[0].groupId == 0);
+	CHECK(posts[1].msgId == 7 && posts[1].groupId == 3);
+
+	CHECK(!selection.toggle({ .msgId = 7, .groupId = 3 }));
+	CHECK(!selection.contains(7));
+	CHECK(selection.count() == 1);
+}
+
+void TestPostSelectionUntickedStaysOut() {
+	auto selection = PostSelection();
+	selection.toggle({ .msgId = 9 });
+	selection.toggle({ .msgId = 9 });
+	selection.addFound({ .msgId = 9 });
+	selection.addFound({ .msgId = 4 });
+	CHECK(!selection.contains(9));
+	CHECK(selection.contains(4));
+
+	// Ticked again by hand: found again later, no duplicate.
+	CHECK(selection.toggle({ .msgId = 9 }));
+	selection.addFound({ .msgId = 9 });
+	CHECK(selection.count() == 2);
+
+	selection.toggle({ .msgId = 4 });
+	selection.forgetUnticked();
+	selection.addFound({ .msgId = 4 });
+	CHECK(selection.contains(4));
 }
 
 void TestSearchPagingDone() {
@@ -431,18 +325,6 @@ void TestSearchPagingDone() {
 } // namespace
 
 int main() {
-	TestPrepareQueryTrimsAndLowercases();
-	TestPrepareQueryHashtag();
-	TestPrepareQueryDateBounds();
-	TestSearchText();
-	TestServerMinDate();
-	TestServerMaxDate();
-	TestMatchesPhraseOnly();
-	TestMatchesHashtagOnly();
-	TestMatchesPhraseAndHashtag();
-	TestMatchesEmptyQuery();
-	TestMatchesCaseInsensitive();
-	TestMatchesDateBounds();
 	TestAlbumIdRange();
 	TestAlbumNeighborIds();
 	TestChunkIds();
@@ -461,8 +343,9 @@ int main() {
 	TestReserveNameBumpsSameName();
 	TestReserveNameSkipsExistingFile();
 	TestResolveDownloadFolder();
-	TestProgressRatioAndTotal();
-	TestIsPartialResult();
+	TestProgressRatio();
+	TestPostSelectionToggle();
+	TestPostSelectionUntickedStaysOut();
 	TestSearchPagingDone();
 
 	if (gFailed) {

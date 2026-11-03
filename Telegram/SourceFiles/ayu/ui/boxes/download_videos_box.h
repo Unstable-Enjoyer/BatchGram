@@ -6,16 +6,17 @@
 // Copyright @Radolyn, 2026
 #pragma once
 
-namespace Main {
-class Session;
-} // namespace Main
+namespace Window {
+class SessionController;
+} // namespace Window
 
 namespace AyuBulkDownload {
-struct SearchOutcome;
+struct DownloadSet;
 } // namespace AyuBulkDownload
 
-// Shows the result of a finished search in the account's window: the
-// download confirm, "No videos found." or the failure message.
-void ShowDownloadVideosResult(
-	not_null<Main::Session*> session,
-	AyuBulkDownload::SearchOutcome outcome);
+// The download confirm of the selected posts, or "No videos found."
+// `started` is called when the downloads start.
+void ShowDownloadConfirm(
+	not_null<Window::SessionController*> controller,
+	AyuBulkDownload::DownloadSet set,
+	Fn<void()> started);

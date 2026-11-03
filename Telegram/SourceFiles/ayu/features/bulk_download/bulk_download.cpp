@@ -6,7 +6,6 @@
 // Copyright @Radolyn, 2026
 #include "ayu/features/bulk_download/bulk_download.h"
 
-#include "ayu/ui/boxes/download_videos_box.h"
 #include "base/base_file_utilities.h"
 #include "core/application.h"
 #include "core/core_settings.h"
@@ -20,11 +19,18 @@
 #include "data/data_photo.h"
 #include "data/data_photo_media.h"
 #include "data/data_session.h"
+#include "dialogs/ui/chat_search_in.h"
+#include "dialogs/dialogs_key.h"
+#include "history/history.h"
 #include "history/history_item.h"
 #include "main/main_session.h"
 #include "storage/storage_account.h"
+#include "ui/effects/round_checkbox.h"
 
 #include <map>
+
+#include "styles/style_dialogs.h"
+#include "styles/style_overview.h"
 
 namespace AyuBulkDownload {
 namespace {
@@ -59,40 +65,27 @@ private:
 
 };
 
-struct AccountData {
-	std::unique_ptr<VideoSearch> search;
-	std::unique_ptr<PhotoSaver> photos;
-};
-
-[[nodiscard]] auto Accounts()
--> std::map<not_null<Main::Session*>, AccountData> & {
-	static auto result = std::map<not_null<Main::Session*>, AccountData>();
+[[nodiscard]] auto PhotoSavers()
+-> std::map<not_null<Main::Session*>, std::unique_ptr<PhotoSaver>> & {
+	static auto result = std::map<
+		not_null<Main::Session*>,
+		std::unique_ptr<PhotoSaver>>();
 	return result;
 }
 
-[[nodiscard]] AccountData &Account(not_null<Main::Session*> session) {
-	auto &accounts = Accounts();
-	const auto i = accounts.find(session);
-	if (i != accounts.end()) {
-		return i->second;
+[[nodiscard]] not_null<PhotoSaver*> PhotoSaverFor(
+		not_null<Main::Session*> session) {
+	auto &savers = PhotoSavers();
+	auto &result = savers[session];
+	if (!result) {
+		result = std::make_unique<PhotoSaver>(session);
+		// Logout or session destruction cancels the photo saves.
+		session->lifetime().add([=] {
+			auto taken = base::take(PhotoSavers()[session]);
+			PhotoSavers().erase(session);
+		});
 	}
-	// Logout or session destruction cancels the search and photo saves.
-	session->lifetime().add([=] {
-		auto taken = base::take(Accounts()[session]);
-		Accounts().erase(session);
-	});
-	return accounts[session];
-}
-
-void DestroySearch(not_null<Main::Session*> session) {
-	auto &accounts = Accounts();
-	const auto i = accounts.find(session);
-	if (i != accounts.end() && i->second.search) {
-		// Take it out first, so Find() is empty during destruction.
-		{
-			auto taken = base::take(i->second.search);
-		}
-	}
+	return result.get();
 }
 
 [[nodiscard]] const MessagesList *MessagesFrom(
@@ -129,14 +122,10 @@ void DestroySearch(not_null<Main::Session*> session) {
 }
 
 // Unsavable videos (forbidsFileSave) are skipped silently.
-// The filepath check stats the file, so it's done only once, in finish():
-// the live progress count uses the cheap checks and may over-count.
-[[nodiscard]] bool SkipVideo(
-		not_null<DocumentData*> document,
-		bool checkFile) {
+[[nodiscard]] bool SkipVideo(not_null<DocumentData*> document) {
 	return document->loading()
 		|| document->forbidsFileSave()
-		|| (checkFile && !document->filepath(true).isEmpty());
+		|| !document->filepath(true).isEmpty();
 }
 
 [[nodiscard]] bool FileExists(const QString &path) {
@@ -272,7 +261,8 @@ QString DefaultDownloadFolder(not_null<Main::Session*> session) {
 
 void StartDownloads(
 		not_null<Main::Session*> session,
-		const SearchOutcome &outcome,
+		const DownloadSet &set,
+		bool includePhotos,
 		const QString &folder) {
 	const auto target = ResolveDownloadFolder(
 		folder,
@@ -288,7 +278,7 @@ void StartDownloads(
 	}
 	auto reservation = NameReservation();
 	auto videoPaths = std::map<FullMsgId, QString>();
-	for (const auto &id : outcome.videos) {
+	for (const auto &id : set.videos) {
 		const auto item = session->data().message(id);
 		const auto video = item ? VideoOf(item) : nullptr;
 		if (!video || video->loading()) {
@@ -299,14 +289,11 @@ void StartDownloads(
 			videoPaths.emplace(id, path);
 		}
 	}
-	if (outcome.photos.empty()) {
+	if (!includePhotos || set.photos.empty()) {
 		return;
 	}
-	auto &saver = Account(session).photos;
-	if (!saver) {
-		saver = std::make_unique<PhotoSaver>(session);
-	}
-	for (const auto &[photoId, videoId] : outcome.photos) {
+	const auto saver = PhotoSaverFor(session);
+	for (const auto &[photoId, videoId] : set.photos) {
 		const auto i = videoPaths.find(videoId);
 		const auto item = session->data().message(photoId);
 		const auto photo = item ? PhotoOf(item) : nullptr;
@@ -326,72 +313,178 @@ void StartDownloads(
 	}
 }
 
-VideoSearch::VideoSearch(
+ChannelData *SelectableSearchChannel(const Dialogs::SearchState &state) {
+	if (state.tab != Dialogs::ChatSearchTab::ThisPeer
+		|| state.fromPeer
+		|| !state.tags.empty()
+		|| state.query.trimmed().isEmpty()) {
+		return nullptr;
+	}
+	const auto history = state.inChat.history();
+	const auto channel = history ? history->peer->asChannel() : nullptr;
+	return (channel && !channel->isMonoforum()) ? channel : nullptr;
+}
+
+SearchSelection::SearchSelection(
 	not_null<ChannelData*> channel,
-	Query query,
-	bool includePhotos)
+	QString query,
+	Fn<std::vector<not_null<HistoryItem*>>()> shownResults,
+	Fn<void()> repaint)
 : _channel(channel)
 , _query(std::move(query))
-, _includePhotos(includePhotos)
+, _shownResults(std::move(shownResults))
+, _repaint(std::move(repaint))
 , _api(&channel->session().mtp()) {
 }
 
-VideoSearch::~VideoSearch() = default;
+SearchSelection::~SearchSelection() = default;
 
-VideoSearch *VideoSearch::Find(not_null<Main::Session*> session) {
-	const auto &accounts = Accounts();
-	const auto i = accounts.find(session);
-	return (i != accounts.end()) ? i->second.search.get() : nullptr;
+bool SearchSelection::contains(not_null<const HistoryItem*> item) const {
+	return (item->history()->peer == _channel)
+		&& _selection.contains(item->id.bare);
 }
 
-not_null<VideoSearch*> VideoSearch::Start(
-		not_null<ChannelData*> channel,
-		Query query,
-		bool includePhotos) {
-	const auto session = &channel->session();
-	if (const auto running = Find(session)) {
-		return running;
+bool SearchSelection::toggle(not_null<const HistoryItem*> item) {
+	if (item->history()->peer != _channel) {
+		return false;
 	}
-	auto &data = Account(session);
-	data.search = std::make_unique<VideoSearch>(
-		channel,
-		std::move(query),
-		includePhotos);
-	const auto result = data.search.get();
-	LOG(("AyuGram bulk: search started"));
-	result->requestPage();
-	return result;
+	_selection.toggle({
+		.msgId = item->id.bare,
+		.groupId = item->groupId().value,
+	});
+	pushState();
+	_repaint();
+	return true;
 }
 
-void VideoSearch::stop() {
-	DestroySearch(&_channel->session());
+void SearchSelection::selectAll() {
+	_selection.forgetUnticked();
+	for (const auto &item : _shownResults()) {
+		if (item->history()->peer == _channel
+			&& (item->groupId() || VideoOf(item) || PhotoOf(item))) {
+			_selection.addFound({
+				.msgId = item->id.bare,
+				.groupId = item->groupId().value,
+			});
+		}
+	}
+	for (const auto &post : _found) {
+		_selection.addFound(post);
+	}
+	if (!_foundAll && !_loading && !_ready) {
+		LOG(("AyuGram bulk: select all started"));
+		_found.clear();
+		_offsetId = 0;
+		_progress = SearchProgress();
+		_loading = true;
+		requestPage();
+	}
+	pushState();
+	_repaint();
 }
 
-not_null<ChannelData*> VideoSearch::channel() const {
-	return _channel;
+void SearchSelection::stop() {
+	if (_loading) {
+		_api.request(base::take(_requestId)).cancel();
+		_loading = false;
+		_partial = true;
+	} else if (_ready) {
+		_api.request(base::take(_requestId)).cancel();
+		_ready = nullptr;
+	}
+	pushState();
 }
 
-rpl::producer<SearchProgress> VideoSearch::progressValue() const {
-	return _progress.value();
+void SearchSelection::prepareDownload(Fn<void(DownloadSet)> ready) {
+	if (_ready) {
+		return;
+	}
+	stop();
+	_ready = std::move(ready);
+
+	auto byGroup = std::map<uint64, std::vector<int64>>();
+	for (const auto &post : _selection.posts()) {
+		if (post.groupId) {
+			byGroup[post.groupId].push_back(post.msgId);
+		}
+	}
+	auto albums = std::vector<std::vector<int64>>();
+	albums.reserve(byGroup.size());
+	for (auto &[groupId, members] : byGroup) {
+		albums.push_back(std::move(members));
+	}
+	const auto neighbors = AlbumNeighborIds(albums, [&](int64 id) {
+		return lookup(id) != nullptr;
+	});
+	_chunks = ChunkIds(neighbors);
+	_chunkIndex = 0;
+	LOG(("AyuGram bulk: album phase: %1 ids, %2 chunks"
+		).arg(int(neighbors.size())
+		).arg(int(_chunks.size())));
+	pushState();
+	requestNextChunk();
 }
 
-rpl::lifetime &VideoSearch::lifetime() {
+void SearchSelection::close() {
+	stop();
+	_closeRequests.fire({});
+}
+
+void SearchSelection::paintCheck(
+		QPainter &p,
+		not_null<const HistoryItem*> item,
+		const style::DialogRow &st,
+		int outerWidth) {
+	if (item->history()->peer != _channel) {
+		return;
+	}
+	const auto checked = _selection.contains(item->id.bare);
+	auto &check = _checks[item->id];
+	if (!check) {
+		check = std::make_unique<Ui::RoundCheckbox>(
+			st::overviewSmallCheck,
+			_repaint);
+		check->setDisplayInactive(true);
+		check->setChecked(checked, anim::type::instant);
+	} else {
+		check->setChecked(checked);
+	}
+	// Same corner of the thumbnail as the shared files list selection.
+	const auto shift = st.photoSize
+		+ st::overviewCheckSkip
+		- st::overviewSmallCheck.size;
+	check->paint(
+		p,
+		st.padding.left() + shift,
+		st.padding.top() + shift,
+		outerWidth);
+}
+
+rpl::producer<SearchSelection::State> SearchSelection::stateValue() const {
+	return _state.value();
+}
+
+rpl::producer<> SearchSelection::closeRequests() const {
+	return _closeRequests.events();
+}
+
+rpl::lifetime &SearchSelection::lifetime() {
 	return _lifetime;
 }
 
-void VideoSearch::requestPage() {
+void SearchSelection::requestPage() {
 	// Flood waits are delayed and retried by the MTP layer, as usual.
-	_api.request(MTPmessages_Search(
+	_requestId = _api.request(MTPmessages_Search(
 		MTP_flags(0),
 		_channel->input(),
-		MTP_string(SearchText(_query)),
+		MTP_string(_query),
 		MTP_inputPeerEmpty(), // from_id
 		MTPInputPeer(), // saved_peer_id
 		MTPVector<MTPReaction>(), // saved_reaction
 		MTP_int(0), // top_msg_id
 		MTP_inputMessagesFilterPhotoVideo(),
-		MTP_int(ServerMinDate(_query)),
-		MTP_int(ServerMaxDate(_query)),
+		MTP_int(0), // min_date
+		MTP_int(0), // max_date
 		MTP_int(_offsetId.bare),
 		MTP_int(0), // add_offset
 		MTP_int(kSearchPerPage),
@@ -399,20 +492,23 @@ void VideoSearch::requestPage() {
 		MTP_int(0), // min_id
 		MTP_long(0) // hash
 	)).done([=](const MTPmessages_Messages &result) {
+		_requestId = 0;
 		pageReceived(result);
 	}).fail([=](const MTP::Error &error) {
+		_requestId = 0;
 		LOG(("AyuGram bulk: search page failed: %1").arg(error.type()));
 		pageFailed();
 	}).send();
 }
 
-void VideoSearch::pageFailed() {
-	// Keep what was collected so far.
-	_failed = true;
-	requestAlbums();
+void SearchSelection::pageFailed() {
+	// Keep what was found so far.
+	_loading = false;
+	_partial = true;
+	pushState();
 }
 
-void VideoSearch::pageReceived(const MTPmessages_Messages &result) {
+void SearchSelection::pageReceived(const MTPmessages_Messages &result) {
 	auto &owner = _channel->owner();
 	owner.processExistingMessages(_channel, result);
 
@@ -429,55 +525,43 @@ void VideoSearch::pageReceived(const MTPmessages_Messages &result) {
 			if (!minId || id < minId) {
 				minId = id;
 			}
-			const auto item = owner.message(_channel, id);
-			if (!item
-				|| !Matches(_query, item->originalText().text, item->date())) {
-				continue;
+			if (const auto item = owner.message(_channel, id)) {
+				const auto post = MatchedPost{
+					.msgId = id.bare,
+					.groupId = item->groupId().value,
+				};
+				_found.push_back(post);
+				_selection.addFound(post);
 			}
-			_posts.push_back({
-				.msgId = id.bare,
-				.groupId = item->groupId().value,
-			});
 		}
 	}
-	auto progress = _progress.current();
-	progress.scanned += received;
-	progress.total = std::max(progress.total, TotalFrom(result));
-	_progress = progress;
-	updateProgress();
+	_progress.scanned += received;
+	_progress.total = std::max(_progress.total, TotalFrom(result));
 	LOG(("AyuGram bulk: page received: %1 received, %2 scanned, %3 total"
 		).arg(received
-		).arg(progress.scanned
-		).arg(progress.total));
+		).arg(_progress.scanned
+		).arg(_progress.total));
 
 	const auto complete = !list
 		|| (result.type() == mtpc_messages_messages)
-		|| SearchPagingDone(received, progress.scanned, progress.total)
+		|| SearchPagingDone(received, _progress.scanned, _progress.total)
 		|| (_offsetId && minId >= _offsetId);
-	if (!complete) {
+	if (complete) {
+		LOG(("AyuGram bulk: paging done"));
+		_loading = false;
+		_foundAll = true;
+		_partial = false;
+	} else {
 		_offsetId = minId;
 		requestPage();
-		return;
 	}
-	LOG(("AyuGram bulk: paging done"));
-	requestAlbums();
+	pushState();
+	_repaint();
 }
 
-void VideoSearch::requestAlbums() {
-	const auto neighbors = AlbumNeighborIds(albums(), [&](int64 id) {
-		return lookup(id) != nullptr;
-	});
-	_chunks = ChunkIds(neighbors);
-	LOG(("AyuGram bulk: album phase: %1 ids, %2 chunks"
-		).arg(int(neighbors.size())
-		).arg(int(_chunks.size())));
-	_chunkIndex = 0;
-	requestNextChunk();
-}
-
-void VideoSearch::requestNextChunk() {
+void SearchSelection::requestNextChunk() {
 	if (_chunkIndex >= int(_chunks.size())) {
-		finish();
+		finishPreparing();
 		return;
 	}
 	const auto index = _chunkIndex++;
@@ -485,30 +569,56 @@ void VideoSearch::requestNextChunk() {
 	for (const auto id : _chunks[index]) {
 		ids.push_back(MTP_inputMessageID(MTP_int(id)));
 	}
-	_api.request(MTPchannels_GetMessages(
+	_requestId = _api.request(MTPchannels_GetMessages(
 		_channel->inputChannel(),
 		MTP_vector<MTPInputMessage>(ids)
 	)).done([=](const MTPmessages_Messages &result) {
-		LOG(("AyuGram bulk: chunk %1 received").arg(index));
+		_requestId = 0;
 		_channel->owner().processExistingMessages(_channel, result);
-		updateProgress();
+		pushState();
 		requestNextChunk();
 	}).fail([=] {
+		_requestId = 0;
 		LOG(("AyuGram bulk: chunk %1 failed").arg(index));
 		// A failed chunk only means fewer album items, keep going.
 		requestNextChunk();
 	}).send();
 }
 
-void VideoSearch::updateProgress() {
-	const auto selection = select(false);
-	auto progress = _progress.current();
-	progress.videos = int(selection.videos.size());
-	progress.photos = int(selection.photos.size());
-	_progress = progress;
+void SearchSelection::finishPreparing() {
+	auto set = collect();
+	LOG(("AyuGram bulk: prepared: %1 videos, %2 photos, partial: %3"
+		).arg(int(set.videos.size())
+		).arg(int(set.photos.size())
+		).arg(Logs::b(set.partial)));
+	const auto ready = base::take(_ready);
+	pushState();
+	ready(std::move(set));
 }
 
-MediaSelection VideoSearch::select(bool checkFiles) const {
+void SearchSelection::pushState() {
+	const auto preparing = (_ready != nullptr);
+	_state = State{
+		.count = _selection.count(),
+		.loading = _loading,
+		.preparing = preparing,
+		.progress = _loading
+			? ProgressRatio(_progress)
+			: preparing
+			? ProgressRatio({
+				.scanned = _chunkIndex,
+				.total = int(_chunks.size()),
+			})
+			: 0.,
+	};
+}
+
+HistoryItem *SearchSelection::lookup(int64 id) const {
+	return _channel->owner().message(_channel, MsgId(id));
+}
+
+DownloadSet SearchSelection::collect() const {
+	const auto posts = _selection.posts();
 	auto candidates = std::vector<Candidate>();
 	const auto add = [&](not_null<HistoryItem*> item) {
 		const auto video = VideoOf(item);
@@ -518,18 +628,19 @@ MediaSelection VideoSearch::select(bool checkFiles) const {
 			.groupId = item->groupId().value,
 			.documentId = video ? uint64(video->id) : uint64(0),
 			.isVideo = (video != nullptr),
-			.skip = video && SkipVideo(video, checkFiles),
+			.skip = video && SkipVideo(video),
 			.photoId = photo ? uint64(photo->id) : uint64(0),
 		});
 	};
-	for (const auto &post : _posts) {
-		if (!post.groupId) {
-			if (const auto item = lookup(post.msgId)) {
-				add(item);
-			}
+	auto byGroup = std::map<uint64, std::vector<int64>>();
+	for (const auto &post : posts) {
+		if (post.groupId) {
+			byGroup[post.groupId].push_back(post.msgId);
+		} else if (const auto item = lookup(post.msgId)) {
+			add(item);
 		}
 	}
-	for (const auto &members : albums()) {
+	for (const auto &[groupId, members] : byGroup) {
 		const auto range = AlbumIdRange(members);
 		for (auto id = range.from; id <= range.till; ++id) {
 			if (const auto item = lookup(id)) {
@@ -537,75 +648,34 @@ MediaSelection VideoSearch::select(bool checkFiles) const {
 			}
 		}
 	}
-	return SelectMedia(_posts, candidates, _includePhotos);
-}
+	const auto selection = SelectMedia(posts, candidates, true);
 
-void VideoSearch::finish() {
-	if (_finished) {
-		return;
-	}
-	_finished = true;
-
-	const auto selection = select(true);
 	const auto peerId = _channel->id;
-	auto outcome = SearchOutcome{
+	auto result = DownloadSet{
 		.channel = _channel,
-		.partial = IsPartialResult(_failed, _progress.current().scanned),
-		.failed = _failed && !_progress.current().scanned,
+		.partial = _partial,
 	};
 	for (const auto id : selection.videos) {
-		const auto itemId = FullMsgId(peerId, MsgId(id));
-		outcome.videos.push_back(itemId);
+		result.videos.push_back(FullMsgId(peerId, MsgId(id)));
 		if (const auto item = lookup(id)) {
 			if (const auto video = VideoOf(item)) {
-				outcome.size += video->size;
+				result.videosSize += video->size;
 			}
 		}
 	}
 	for (const auto &pick : selection.photos) {
-		outcome.photos.push_back({
+		result.photos.push_back({
 			.photo = FullMsgId(peerId, MsgId(pick.msgId)),
 			.video = FullMsgId(peerId, MsgId(pick.videoMsgId)),
 		});
 		if (const auto item = lookup(pick.msgId)) {
 			if (const auto photo = PhotoOf(item)) {
 				// Unknown sizes (0) are left out of the total.
-				outcome.size += std::max(
+				result.photosSize += std::max(
 					photo->imageByteSize(Data::PhotoSize::Large),
 					0);
 			}
 		}
-	}
-
-	LOG(("AyuGram bulk: finished: %1 videos, %2 photos, partial: %3"
-		).arg(int(outcome.videos.size())
-		).arg(int(outcome.photos.size())
-		).arg(Logs::b(outcome.partial)));
-
-	const auto session = &_channel->session();
-	ShowDownloadVideosResult(session, std::move(outcome));
-
-	// We're inside an MTP handler of our own sender, destroy later.
-	crl::on_main(this, [=] {
-		DestroySearch(session);
-	});
-}
-
-HistoryItem *VideoSearch::lookup(int64 id) const {
-	return _channel->owner().message(_channel, MsgId(id));
-}
-
-std::vector<std::vector<int64>> VideoSearch::albums() const {
-	auto byGroup = std::map<uint64, std::vector<int64>>();
-	for (const auto &post : _posts) {
-		if (post.groupId) {
-			byGroup[post.groupId].push_back(post.msgId);
-		}
-	}
-	auto result = std::vector<std::vector<int64>>();
-	result.reserve(byGroup.size());
-	for (auto &[groupId, members] : byGroup) {
-		result.push_back(std::move(members));
 	}
 	return result;
 }

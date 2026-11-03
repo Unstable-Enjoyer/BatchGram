@@ -8,15 +8,14 @@
 
 #include "ayu/features/bulk_download/bulk_download.h"
 #include "core/file_utilities.h"
-#include "data/data_channel.h"
 #include "lang/lang_keys.h"
 #include "main/main_session.h"
 #include "ui/boxes/confirm_box.h"
 #include "ui/layers/generic_box.h"
 #include "ui/text/format_values.h"
 #include "ui/widgets/buttons.h"
+#include "ui/widgets/checkbox.h"
 #include "ui/widgets/labels.h"
-#include "window/window_controller.h"
 #include "window/window_session_controller.h"
 
 #include <QtGui/QKeyEvent>
@@ -38,22 +37,26 @@ namespace {
 	return tr::ayu_DownloadPhotosCount(tr::now, lt_count_decimal, count);
 }
 
-[[nodiscard]] QString ConfirmText(const SearchOutcome &outcome) {
-	const auto items = outcome.photos.empty()
-		? CountVideos(int(outcome.videos.size()))
+[[nodiscard]] QString ConfirmText(
+		const DownloadSet &set,
+		bool includePhotos) {
+	const auto photos = includePhotos ? int(set.photos.size()) : 0;
+	const auto items = !photos
+		? CountVideos(int(set.videos.size()))
 		: tr::ayu_DownloadVideosAndPhotos(
 			tr::now,
 			lt_videos,
-			CountVideos(int(outcome.videos.size())),
+			CountVideos(int(set.videos.size())),
 			lt_photos,
-			CountPhotos(int(outcome.photos.size())));
+			CountPhotos(photos));
+	const auto size = set.videosSize + (photos ? set.photosSize : 0);
 	const auto question = tr::ayu_DownloadVideosConfirm(
 		tr::now,
 		lt_items,
 		items,
 		lt_size,
-		Ui::FormatSizeText(outcome.size));
-	return outcome.partial
+		Ui::FormatSizeText(size));
+	return set.partial
 		? (tr::ayu_DownloadVideosStoppedEarly(tr::now) + u"\n\n"_q + question)
 		: question;
 }
@@ -64,15 +67,20 @@ namespace {
 void ResultBox(
 		not_null<Ui::GenericBox*> box,
 		not_null<Main::Session*> session,
-		SearchOutcome outcome) {
+		DownloadSet set,
+		Fn<void()> started) {
 	const auto folder = box->lifetime().make_state<QString>(
 		DefaultDownloadFolder(session));
 	const auto picked = box->lifetime().make_state<QString>();
+	const auto includePhotos = box->lifetime().make_state<
+		rpl::variable<bool>>(false);
 
 	box->addRow(
 		object_ptr<Ui::FlatLabel>(
 			box,
-			ConfirmText(outcome),
+			includePhotos->value() | rpl::map([=](bool photos) {
+				return ConfirmText(set, photos);
+			}),
 			st::boxLabel),
 		st::boxPadding);
 
@@ -127,10 +135,28 @@ void ResultBox(
 			crl::guard(box, handleFolder));
 	});
 
+	// Same as the options of the Export chat history settings.
+	box->addRow(
+		object_ptr<Ui::Checkbox>(
+			box,
+			tr::ayu_DownloadVideosIncludePhotos(tr::now),
+			false,
+			st::defaultBoxCheckbox),
+		style::margins(
+			st::boxPadding.left(),
+			0,
+			st::boxPadding.right(),
+			st::boxPadding.bottom())
+	)->checkedChanges(
+	) | rpl::on_next([=](bool checked) {
+		*includePhotos = checked;
+	}, box->lifetime());
+
 	const auto confirm = box->addButton(tr::lng_media_download(), [=] {
 		// The picked folder applies to this batch only.
-		StartDownloads(session, outcome, *picked);
+		StartDownloads(session, set, includePhotos->current(), *picked);
 		box->closeBox();
+		started();
 	});
 	box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
 
@@ -149,23 +175,21 @@ void ResultBox(
 
 } // namespace
 
-void ShowDownloadVideosResult(
-		not_null<Main::Session*> session,
-		SearchOutcome outcome) {
-	const auto resolved = session->tryResolveWindow(outcome.channel);
-	if (!resolved) {
-		return;
-	}
-	const auto window = &resolved->window();
-	if (outcome.failed) {
-		window->show(Ui::MakeInformBox(tr::ayu_DownloadVideosFailed()));
-	} else if (outcome.videos.empty()) {
-		window->show(Ui::MakeInformBox(outcome.partial
+void ShowDownloadConfirm(
+		not_null<Window::SessionController*> controller,
+		DownloadSet set,
+		Fn<void()> started) {
+	if (set.videos.empty()) {
+		controller->show(Ui::MakeInformBox(set.partial
 			? (tr::ayu_DownloadVideosStoppedEarly(tr::now)
 				+ u"\n\n"_q
 				+ tr::ayu_DownloadVideosNotFound(tr::now))
 			: tr::ayu_DownloadVideosNotFound(tr::now)));
 	} else {
-		window->show(Box(ResultBox, session, std::move(outcome)));
+		controller->show(Box(
+			ResultBox,
+			&controller->session(),
+			std::move(set),
+			std::move(started)));
 	}
 }

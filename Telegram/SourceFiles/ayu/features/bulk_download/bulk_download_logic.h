@@ -12,7 +12,6 @@
 
 #include "base/basic_types.h"
 
-#include <QDate>
 #include <QString>
 
 #include <functional>
@@ -25,36 +24,6 @@ namespace AyuBulkDownload {
 inline constexpr auto kMaxAlbumSize = 10;
 inline constexpr auto kIdsPerRequest = 100;
 inline constexpr auto kSearchPerPage = 100;
-
-struct Query {
-	QString phrase; // Trimmed and lowercased, empty = no constraint.
-	QString hashtag; // Trimmed, lowercased, '#'-prefixed, empty = none.
-	TimeId minDate = 0; // Inclusive, 0 = no constraint.
-	TimeId maxDate = 0; // Inclusive, 0 = no constraint.
-};
-
-// from / till may be invalid (QDate()), meaning no constraint.
-// minDate = start of `from` day, maxDate = last second of `till` day,
-// both in local time.
-[[nodiscard]] Query PrepareQuery(
-	const QString &phrase,
-	const QString &hashtag,
-	QDate from,
-	QDate till);
-
-// The `q` for messages.search: phrase and hashtag joined by a space.
-[[nodiscard]] QString SearchText(const Query &query);
-
-// messages.search treats min_date / max_date as exclusive bounds,
-// so widen by one second. Returns 0 when there is no constraint.
-[[nodiscard]] TimeId ServerMinDate(const Query &query);
-[[nodiscard]] TimeId ServerMaxDate(const Query &query);
-
-// Lowercase containment of phrase and hashtag, plus inclusive date range.
-[[nodiscard]] bool Matches(
-	const Query &query,
-	const QString &text,
-	TimeId date);
 
 struct IdRange {
 	int64 from = 0; // Inclusive.
@@ -82,6 +51,25 @@ struct IdRange {
 struct MatchedPost {
 	int64 msgId = 0;
 	uint64 groupId = 0; // 0 when the post is a single message.
+};
+
+// Posts picked in the search results. A post unticked by hand stays out
+// when "Select all" finds it later, until forgetUnticked() is called.
+class PostSelection final {
+public:
+	[[nodiscard]] bool contains(int64 msgId) const;
+	[[nodiscard]] int count() const;
+	[[nodiscard]] std::vector<MatchedPost> posts() const; // Sorted by id.
+
+	// Returns whether the post is selected after the call.
+	bool toggle(MatchedPost post);
+	void addFound(MatchedPost post);
+	void forgetUnticked();
+
+private:
+	std::map<int64, uint64> _selected;
+	std::set<int64> _unticked;
+
 };
 
 struct Candidate {
@@ -167,23 +155,15 @@ struct NameReservation {
 struct SearchProgress {
 	int scanned = 0; // Search results received so far.
 	int total = 0; // The server `count`, 0 while unknown.
-	int videos = 0; // Videos selected so far.
-	int photos = 0; // Photos selected so far.
 
 	friend inline bool operator==(
 		const SearchProgress &,
 		const SearchProgress &) = default;
 };
 
-// The total to show next to `scanned`: never less than scanned.
-[[nodiscard]] int ProgressTotal(const SearchProgress &progress);
-
-// Progress in [0, 1] for the bar: scanned / ProgressTotal().
+// Progress in [0, 1]: scanned / total, where total is never less than
+// scanned.
 [[nodiscard]] float64 ProgressRatio(const SearchProgress &progress);
-
-// A search page failed: the result is partial (and still shown) when
-// anything was scanned before the failure.
-[[nodiscard]] bool IsPartialResult(bool failed, int scanned);
 
 // Paging stops when a page brings nothing new (received == 0), or when
 // scanned reached the server's total (total > 0 means the server said it)

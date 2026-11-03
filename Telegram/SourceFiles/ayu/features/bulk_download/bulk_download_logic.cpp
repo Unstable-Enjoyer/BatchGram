@@ -6,67 +6,12 @@
 // Copyright @Radolyn, 2026
 #include "ayu/features/bulk_download/bulk_download_logic.h"
 
-#include <QDateTime>
-
 #include <algorithm>
 #include <map>
 #include <set>
 #include <utility>
 
 namespace AyuBulkDownload {
-
-Query PrepareQuery(
-		const QString &phrase,
-		const QString &hashtag,
-		QDate from,
-		QDate till) {
-	auto result = Query();
-	result.phrase = phrase.trimmed().toLower();
-	auto tag = hashtag.trimmed().toLower();
-	if (!tag.isEmpty() && !tag.startsWith(QChar('#'))) {
-		tag = QChar('#') + tag;
-	}
-	result.hashtag = (tag.size() > 1) ? tag : QString();
-	if (from.isValid()) {
-		result.minDate = TimeId(from.startOfDay().toSecsSinceEpoch());
-	}
-	if (till.isValid()) {
-		result.maxDate = TimeId(
-			till.addDays(1).startOfDay().toSecsSinceEpoch() - 1);
-	}
-	return result;
-}
-
-QString SearchText(const Query &query) {
-	if (query.phrase.isEmpty()) {
-		return query.hashtag;
-	} else if (query.hashtag.isEmpty()) {
-		return query.phrase;
-	}
-	return query.phrase + QChar(' ') + query.hashtag;
-}
-
-TimeId ServerMinDate(const Query &query) {
-	return query.minDate ? (query.minDate - 1) : 0;
-}
-
-TimeId ServerMaxDate(const Query &query) {
-	return query.maxDate ? (query.maxDate + 1) : 0;
-}
-
-bool Matches(const Query &query, const QString &text, TimeId date) {
-	if (query.minDate && date < query.minDate) {
-		return false;
-	} else if (query.maxDate && date > query.maxDate) {
-		return false;
-	}
-	if (query.phrase.isEmpty() && query.hashtag.isEmpty()) {
-		return true;
-	}
-	const auto lower = text.toLower();
-	return (query.phrase.isEmpty() || lower.contains(query.phrase))
-		&& (query.hashtag.isEmpty() || lower.contains(query.hashtag));
-}
 
 IdRange AlbumIdRange(const std::vector<int64> &knownMemberIds) {
 	if (knownMemberIds.empty()) {
@@ -109,6 +54,43 @@ std::vector<std::vector<int64>> ChunkIds(
 		result.emplace_back(ids.begin() + i, ids.begin() + till);
 	}
 	return result;
+}
+
+bool PostSelection::contains(int64 msgId) const {
+	return _selected.contains(msgId);
+}
+
+int PostSelection::count() const {
+	return int(_selected.size());
+}
+
+std::vector<MatchedPost> PostSelection::posts() const {
+	auto result = std::vector<MatchedPost>();
+	result.reserve(_selected.size());
+	for (const auto &[msgId, groupId] : _selected) {
+		result.push_back({ .msgId = msgId, .groupId = groupId });
+	}
+	return result;
+}
+
+bool PostSelection::toggle(MatchedPost post) {
+	if (_selected.erase(post.msgId)) {
+		_unticked.emplace(post.msgId);
+		return false;
+	}
+	_unticked.erase(post.msgId);
+	_selected.emplace(post.msgId, post.groupId);
+	return true;
+}
+
+void PostSelection::addFound(MatchedPost post) {
+	if (!_unticked.contains(post.msgId)) {
+		_selected.emplace(post.msgId, post.groupId);
+	}
+}
+
+void PostSelection::forgetUnticked() {
+	_unticked.clear();
 }
 
 std::vector<int64> SelectVideos(
@@ -247,19 +229,11 @@ QString ResolveDownloadFolder(
 	return result;
 }
 
-int ProgressTotal(const SearchProgress &progress) {
-	return std::max(progress.total, progress.scanned);
-}
-
 float64 ProgressRatio(const SearchProgress &progress) {
-	const auto total = ProgressTotal(progress);
+	const auto total = std::max(progress.total, progress.scanned);
 	return (total > 0)
 		? std::clamp(float64(progress.scanned) / total, 0., 1.)
 		: 0.;
-}
-
-bool IsPartialResult(bool failed, int scanned) {
-	return failed && (scanned > 0);
 }
 
 bool SearchPagingDone(int received, int scanned, int total) {
