@@ -35,6 +35,26 @@ And many more. Check out our [Documentation](https://docs.ayugram.one/desktop/).
   </details>
 </h3>
 
+## Bulk download from search
+
+Download all videos that match a search in a channel.
+
+1. In a channel, open the search (magnifier icon) and search for a phrase or hashtag.
+2. Right-click any result in the left panel and choose **Select**. Tick the posts you want, or press the **Select all** icon to select every match in the channel, including ones that are not loaded yet.
+
+3. Press the **Download** icon. A box opens:
+   - Optionally tick **Include photos**. Photos are saved next to their video, with the same name.
+   - Check the folder. To pick another one, press **Change**.
+   - Press **Download**.
+
+4. The videos are added to Telegram's Downloads manager as they are found. The bar shows "Added N videos to Downloads" with a progress line. A message confirms when all are added. Press × to stop adding. Downloads that are already added keep going.
+
+Notes:
+
+- Downloads use Telegram's normal download path.
+- Progress is not kept if the app closes before all posts are added.
+- Photos are saved to the folder but are not listed in Downloads.
+
 ## Downloads
 
 ### Windows
