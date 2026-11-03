@@ -76,6 +76,8 @@ void ShowSelectionBar(
 			bar,
 			object_ptr<Ui::IconButton>(bar, st::ayuSearchSelectAll),
 			st::infoTopBarScale));
+	selectAll->entity()->setAccessibleName(
+		tr::lng_mac_menu_select_all(tr::now));
 	const auto download = wrap(
 		Ui::CreateChild<Ui::FadeWrap<Ui::IconButton>>(
 			bar,
@@ -92,7 +94,6 @@ void ShowSelectionBar(
 	progress->entity()->setAttribute(Qt::WA_TransparentForMouseEvents);
 
 	struct Flags {
-		bool loading = false;
 		bool preparing = false;
 		bool shown = false;
 	};
@@ -102,18 +103,14 @@ void ShowSelectionBar(
 		const auto animated = flags->shown
 			? anim::type::normal
 			: anim::type::instant;
-		flags->loading = state.loading;
 		flags->preparing = state.preparing;
 		label->entity()->setValue(SelectedText(state.count));
 		download->toggle(state.count > 0, animated);
 		progress->toggle(state.loading || state.preparing, animated);
 		progress->entity()->setValue(state.progress);
-		selectAll->entity()->setIconOverride(
-			state.loading ? &st.mediaCancel.icon : nullptr,
-			state.loading ? &st.mediaCancel.iconOver : nullptr);
-		selectAll->entity()->setAccessibleName(state.loading
-			? tr::lng_cancel(tr::now)
-			: tr::lng_mac_menu_select_all(tr::now));
+		selectAll->toggle(
+			!state.loading && !state.preparing,
+			animated);
 	}, bar->lifetime());
 
 	rpl::combine(
@@ -146,11 +143,7 @@ void ShowSelectionBar(
 		selection->close();
 	});
 	selectAll->entity()->setClickedCallback([=] {
-		if (flags->loading) {
-			selection->stop();
-		} else {
-			selection->selectAll();
-		}
+		selection->selectAll();
 	});
 	download->entity()->setClickedCallback([=] {
 		if (flags->preparing) {
@@ -163,6 +156,12 @@ void ShowSelectionBar(
 			ShowDownloadConfirm(controller, std::move(set), started);
 		}));
 	});
+
+	// Explicit exits fade out, the owner destroys the bar after the fade.
+	selection->closeRequests(
+	) | rpl::on_next([=] {
+		outer->hide(anim::type::normal);
+	}, bar->lifetime());
 
 	flags->shown = true;
 	outer->raise();

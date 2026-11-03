@@ -46,7 +46,7 @@ struct DownloadSet {
 	std::vector<PhotoItem> photos; // Photos of the posts with a video.
 	int64 videosSize = 0;
 	int64 photosSize = 0; // Photos with a known byte size.
-	bool partial = false; // "Select all" stopped before the end.
+	bool partial = false; // A "Select all" page failed.
 };
 
 // Where a batch goes by default: the download path setting, resolved
@@ -92,12 +92,12 @@ public:
 	~SearchSelection();
 
 	// Returns false for messages of other chats, they are never selected.
-	// While the download is preparing, the selection is kept as is.
+	// After Download is pressed or while closing, nothing changes.
 	bool toggle(not_null<const HistoryItem*> item);
 	void selectAll();
-	// Stops "Select all" (keeping what it found) or the download preparing.
-	void stop();
+	// Waits for a running "Select all" to finish, then loads the albums.
 	void prepareDownload(Fn<void(DownloadSet)> ready);
+	// Cancels all requests, the owner destroys it after closeRequests().
 	void close();
 
 	void paintCheck(
@@ -114,6 +114,8 @@ private:
 	void requestPage();
 	void pageReceived(const MTPmessages_Messages &result);
 	void pageFailed();
+	void pagingFinished();
+	void requestAlbums();
 	void requestNextChunk();
 	void finishPreparing();
 	void pushState();
@@ -137,6 +139,7 @@ private:
 	bool _foundAll = false;
 	bool _loading = false;
 	bool _partial = false;
+	bool _closing = false;
 
 	std::vector<std::vector<int64>> _chunks;
 	int _chunkIndex = 0;

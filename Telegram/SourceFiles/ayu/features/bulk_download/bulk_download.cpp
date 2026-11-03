@@ -342,7 +342,7 @@ SearchSelection::~SearchSelection() = default;
 bool SearchSelection::toggle(not_null<const HistoryItem*> item) {
 	if (item->history()->peer != _channel) {
 		return false;
-	} else if (_ready) {
+	} else if (_ready || _closing) {
 		return true;
 	}
 	_selection.toggle({
@@ -355,7 +355,7 @@ bool SearchSelection::toggle(not_null<const HistoryItem*> item) {
 }
 
 void SearchSelection::selectAll() {
-	if (_ready) {
+	if (_ready || _closing) {
 		return;
 	}
 	_selection.forgetUnticked();
@@ -383,25 +383,30 @@ void SearchSelection::selectAll() {
 	_repaint();
 }
 
-void SearchSelection::stop() {
-	if (_loading) {
-		_api.request(base::take(_requestId)).cancel();
-		_loading = false;
-		_partial = true;
-	} else if (_ready) {
-		_api.request(base::take(_requestId)).cancel();
-		_ready = nullptr;
-	}
-	pushState();
-}
-
 void SearchSelection::prepareDownload(Fn<void(DownloadSet)> ready) {
-	if (_ready) {
+	if (_ready || _closing) {
 		return;
 	}
-	stop();
 	_ready = std::move(ready);
+	if (_loading) {
+		pushState();
+	} else {
+		requestAlbums();
+	}
+}
 
+void SearchSelection::close() {
+	if (_closing) {
+		return;
+	}
+	_closing = true;
+	_api.request(base::take(_requestId)).cancel();
+	_loading = false;
+	_ready = nullptr;
+	_closeRequests.fire({});
+}
+
+void SearchSelection::requestAlbums() {
 	auto byGroup = std::map<uint64, std::vector<int64>>();
 	for (const auto &post : _selection.posts()) {
 		if (post.groupId) {
@@ -423,11 +428,6 @@ void SearchSelection::prepareDownload(Fn<void(DownloadSet)> ready) {
 		).arg(int(_chunks.size())));
 	pushState();
 	requestNextChunk();
-}
-
-void SearchSelection::close() {
-	stop();
-	_closeRequests.fire({});
 }
 
 void SearchSelection::paintCheck(
@@ -503,9 +503,18 @@ void SearchSelection::requestPage() {
 
 void SearchSelection::pageFailed() {
 	// Keep what was found so far.
-	_loading = false;
 	_partial = true;
-	pushState();
+	pagingFinished();
+}
+
+void SearchSelection::pagingFinished() {
+	_loading = false;
+	if (_ready) {
+		requestAlbums();
+	} else {
+		pushState();
+	}
+	_repaint();
 }
 
 void SearchSelection::pageReceived(const MTPmessages_Messages &result) {
@@ -548,15 +557,15 @@ void SearchSelection::pageReceived(const MTPmessages_Messages &result) {
 		|| (_offsetId && minId >= _offsetId);
 	if (complete) {
 		LOG(("AyuGram bulk: paging done"));
-		_loading = false;
 		_foundAll = true;
 		_partial = false;
+		pagingFinished();
 	} else {
 		_offsetId = minId;
 		requestPage();
+		pushState();
+		_repaint();
 	}
-	pushState();
-	_repaint();
 }
 
 void SearchSelection::requestNextChunk() {

@@ -106,7 +106,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ayu/features/bulk_download/bulk_download.h"
 #include "ayu/ui/ayu_userpic.h"
 #include "ayu/utils/telegram_helpers.h"
+#include "base/call_delayed.h"
 #include "styles/style_ayu_icons.h"
+#include "styles/style_info.h"
 
 
 namespace Dialogs {
@@ -6567,7 +6569,7 @@ void InnerWidget::ayuFillSearchResultMenu(FullMsgId itemId) {
 		const auto raw = selection.get();
 		raw->closeRequests(
 		) | rpl::on_next([=] {
-			crl::on_main(raw, [=] {
+			base::call_delayed(st::infoTopBarDuration, raw, [=] {
 				_ayuSearchSelection = nullptr;
 				update();
 			});
