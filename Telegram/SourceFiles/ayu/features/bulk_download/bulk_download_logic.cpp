@@ -83,10 +83,9 @@ bool PostSelection::toggle(MatchedPost post) {
 	return true;
 }
 
-void PostSelection::addFound(MatchedPost post) {
-	if (!_unticked.contains(post.msgId)) {
-		_selected.emplace(post.msgId, post.groupId);
-	}
+bool PostSelection::addFound(MatchedPost post) {
+	return !_unticked.contains(post.msgId)
+		&& _selected.emplace(post.msgId, post.groupId).second;
 }
 
 void PostSelection::forgetUnticked() {

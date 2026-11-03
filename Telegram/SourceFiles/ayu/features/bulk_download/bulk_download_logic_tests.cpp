@@ -296,19 +296,19 @@ void TestPostSelectionUntickedStaysOut() {
 	auto selection = PostSelection();
 	selection.toggle({ .msgId = 9 });
 	selection.toggle({ .msgId = 9 });
-	selection.addFound({ .msgId = 9 });
-	selection.addFound({ .msgId = 4 });
+	CHECK(!selection.addFound({ .msgId = 9 }));
+	CHECK(selection.addFound({ .msgId = 4 }));
 	CHECK(!selection.contains(9));
 	CHECK(selection.contains(4));
 
 	// Ticked again by hand: found again later, no duplicate.
 	CHECK(selection.toggle({ .msgId = 9 }));
-	selection.addFound({ .msgId = 9 });
+	CHECK(!selection.addFound({ .msgId = 9 }));
 	CHECK(selection.count() == 2);
 
 	selection.toggle({ .msgId = 4 });
 	selection.forgetUnticked();
-	selection.addFound({ .msgId = 4 });
+	CHECK(selection.addFound({ .msgId = 4 }));
 	CHECK(selection.contains(4));
 }
 

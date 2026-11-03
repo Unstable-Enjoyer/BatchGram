@@ -63,7 +63,8 @@ public:
 
 	// Returns whether the post is selected after the call.
 	bool toggle(MatchedPost post);
-	void addFound(MatchedPost post);
+	// Returns whether the post was not selected and is selected now.
+	bool addFound(MatchedPost post);
 	void forgetUnticked();
 
 private:
