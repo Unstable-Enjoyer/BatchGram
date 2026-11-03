@@ -39,10 +39,6 @@ rpl::producer<Qt::MouseButton> TopBar::clicks() const {
 	return _button->clicks();
 }
 
-rpl::producer<> TopBar::closeClicks() const {
-	return _closeClicks.events();
-}
-
 void TopBar::resizeToWidthInfo(int w) {
 	if (w <= 0) {
 		return;
@@ -51,15 +47,8 @@ void TopBar::resizeToWidthInfo(int w) {
 	const auto infoTop = st::mediaPlayerNameTop - infoFont->ascent;
 	const auto padding = st::mediaPlayerPlayLeft + st::mediaPlayerPadding;
 	const auto spacing = infoFont->spacew;
-	// AyuGram: room for the close button, 0 for export.
-	const auto closeSkip = (_close && !_close->isHidden())
-		? (_close->width() + st::mediaPlayerCloseRight)
-		: 0;
-	if (closeSkip) {
-		_close->moveToRight(st::mediaPlayerCloseRight, st::mediaPlayerPlayTop, w);
-	}
 	_infoLeft->moveToLeft(padding, infoTop);
-	auto availableWidth = w - closeSkip;
+	auto availableWidth = w;
 	availableWidth -= rect::right(_infoLeft);
 	availableWidth -= padding;
 	_infoMiddle->resizeToWidth(_infoMiddle->naturalWidth());
@@ -71,7 +60,7 @@ void TopBar::resizeToWidthInfo(int w) {
 			: 0);
 	if (requiredWidth > availableWidth) {
 		_infoRight->moveToLeft(
-			w - closeSkip - padding - _infoRight->width(),
+			w - padding - _infoRight->width(),
 			infoTop);
 		_infoMiddle->resizeToWidth(std::max(
 			_infoRight->x()
@@ -97,19 +86,9 @@ void TopBar::updateData(Content &&content) {
 	}
 	const auto &row = content.rows[0];
 	_infoLeft->setMarkedText(
-		(content.title.isEmpty() // AyuGram: title override.
-			? tr::lng_export_progress_title(tr::now, tr::bold)
-			: tr::bold(content.title))
+		tr::lng_export_progress_title(tr::now, tr::bold)
 			.append(' ')
 			.append(QChar(0x2013)));
-	if (content.closable && !_close) { // AyuGram: close button.
-		_close.create(this, st::mediaPlayerClose);
-		_close->setAccessibleName(tr::lng_close(tr::now));
-		_close->setClickedCallback([=] { _closeClicks.fire({}); });
-	}
-	if (_close) {
-		_close->setVisible(content.closable);
-	}
 	_infoMiddle->setText(row.label);
 	_infoRight->setMarkedText(Ui::Text::Colorized(row.info));
 	resizeToWidthInfo(width());

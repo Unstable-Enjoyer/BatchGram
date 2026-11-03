@@ -1946,7 +1946,6 @@ void Filler::fillHistoryActions() {
 	addViewDiscussion();
 	addDirectMessages();
 	addExportChat();
-	AyuUi::AddDownloadVideosAction(_peer, _thread, _controller, _addAction);
 	addTranslate();
 	addReport();
 	addClearHistory();

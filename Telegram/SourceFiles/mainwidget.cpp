@@ -105,8 +105,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 // AyuGram includes
 #include "ayu/features/forward/ayu_forward.h"
-#include "ayu/ui/boxes/download_videos_box.h"
-#include "export/view/export_view_content.h"
 
 
 namespace {
@@ -323,11 +321,6 @@ MainWidget::MainWidget(
 	Core::App().exportManager().currentView(
 	) | rpl::on_next([=](Export::View::PanelController *view) {
 		setCurrentExportView(view);
-	}, lifetime());
-	DownloadVideosTopBarContent(
-		&session()
-	) | rpl::on_next([=](std::optional<Export::View::Content> data) {
-		setAyuSearchTopBar(std::move(data));
 	}, lifetime());
 	if (_exportTopBar) {
 		_exportTopBar->finishAnimating();
@@ -1128,8 +1121,7 @@ void MainWidget::setCurrentExportView(Export::View::PanelController *view) {
 				&& data.rows[0].id == Export::View::Content::kDoneId) {
 				LOG(("Export Info: Destroy top bar by Done."));
 				destroyExportTopBar();
-			// AyuGram: also recreate a bar that is hiding (shared slot).
-			} else if (!_exportTopBar || !_exportTopBar->toggled()) {
+			} else if (!_exportTopBar) {
 				LOG(("Export Info: Create top bar by State."));
 				createExportTopBar(std::move(data));
 			} else {
@@ -1141,25 +1133,6 @@ void MainWidget::setCurrentExportView(Export::View::PanelController *view) {
 
 		LOG(("Export Info: Destroy top bar by controller removal."));
 		destroyExportTopBar();
-		if (_ayuSearchTopBarData) {
-			createExportTopBar(Export::View::Content(*_ayuSearchTopBarData));
-		}
-	}
-}
-
-void MainWidget::setAyuSearchTopBar(
-		std::optional<Export::View::Content> data) {
-	_ayuSearchTopBarData = data
-		? std::make_unique<Export::View::Content>(*data)
-		: nullptr;
-	if (_currentExportView) {
-		return; // Export wins the slot.
-	} else if (!data) {
-		destroyExportTopBar();
-	} else if (!_exportTopBar || !_exportTopBar->toggled()) {
-		createExportTopBar(std::move(*data));
-	} else {
-		_exportTopBar->entity()->updateData(std::move(*data));
 	}
 }
 
@@ -1172,14 +1145,6 @@ void MainWidget::createExportTopBar(Export::View::Content &&data) {
 	) | rpl::on_next([=] {
 		if (_currentExportView) {
 			_currentExportView->activatePanel();
-		} else if (_ayuSearchTopBarData) {
-			DownloadVideosTopBarClicked(_controller);
-		}
-	}, _exportTopBar->lifetime());
-	_exportTopBar->entity()->closeClicks(
-	) | rpl::on_next([=] {
-		if (!_currentExportView) {
-			DownloadVideosTopBarClosed(_controller);
 		}
 	}, _exportTopBar->lifetime());
 	orderWidgets();

@@ -267,7 +267,6 @@ private:
 	void createExportTopBar(Export::View::Content &&data);
 	void destroyExportTopBar();
 	void exportTopBarHeightUpdated();
-	void setAyuSearchTopBar(std::optional<Export::View::Content> data);
 
 	Window::SectionSlideParams prepareShowAnimation(
 		bool willHaveTopBarShadow,
@@ -369,8 +368,6 @@ private:
 	object_ptr<Window::TopBarWrapWidget<Export::View::TopBar>> _exportTopBar
 		= { nullptr };
 	rpl::lifetime _exportViewLifetime;
-	// AyuGram: the bulk video search shares the export top bar slot.
-	std::unique_ptr<Export::View::Content> _ayuSearchTopBarData;
 
 	object_ptr<Window::TopBarWrapWidget<Media::Player::Widget>> _player
 		= { nullptr };

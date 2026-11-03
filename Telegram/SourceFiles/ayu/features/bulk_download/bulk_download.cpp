@@ -84,11 +84,6 @@ struct AccountData {
 	return accounts[session];
 }
 
-[[nodiscard]] rpl::event_stream<not_null<Main::Session*>> &Changes() {
-	static auto result = rpl::event_stream<not_null<Main::Session*>>();
-	return result;
-}
-
 void DestroySearch(not_null<Main::Session*> session) {
 	auto &accounts = Accounts();
 	const auto i = accounts.find(session);
@@ -97,7 +92,6 @@ void DestroySearch(not_null<Main::Session*> session) {
 		{
 			auto taken = base::take(i->second.search);
 		}
-		Changes().fire_copy(session);
 	}
 }
 
@@ -267,13 +261,6 @@ void PhotoSaver::check() {
 
 } // namespace
 
-rpl::producer<> SearchChanges(not_null<Main::Session*> session) {
-	return Changes().events(
-	) | rpl::filter([=](not_null<Main::Session*> changed) {
-		return (changed == session);
-	}) | rpl::to_empty;
-}
-
 QString DefaultDownloadFolder(not_null<Main::Session*> session) {
 	return ResolveDownloadFolder(
 		QString(),
@@ -371,7 +358,6 @@ not_null<VideoSearch*> VideoSearch::Start(
 		std::move(query),
 		includePhotos);
 	const auto result = data.search.get();
-	Changes().fire_copy(session);
 	LOG(("AyuGram bulk: search started"));
 	result->requestPage();
 	return result;

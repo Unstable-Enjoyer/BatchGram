@@ -49,10 +49,6 @@ void StartDownloads(
 	const SearchOutcome &outcome,
 	const QString &folder);
 
-// Fires when the account's search starts or ends (Find() changes).
-[[nodiscard]] rpl::producer<> SearchChanges(
-	not_null<Main::Session*> session);
-
 // Finds videos (and optionally photos) of the posts that match the query
 // using server-side messages.search, then loads the full albums of matched
 // posts. Channels and supergroups only: album neighbors are found by
