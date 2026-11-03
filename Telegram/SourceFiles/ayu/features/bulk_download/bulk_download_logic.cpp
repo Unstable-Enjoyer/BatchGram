@@ -263,7 +263,8 @@ bool IsPartialResult(bool failed, int scanned) {
 }
 
 bool SearchPagingDone(int received, int scanned, int total) {
-	return !received || (total > 0 && scanned >= total);
+	return !received
+		|| (total > 0 && scanned >= total && received < kSearchPerPage);
 }
 
 } // namespace AyuBulkDownload

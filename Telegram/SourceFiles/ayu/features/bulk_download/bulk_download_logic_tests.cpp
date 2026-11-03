@@ -422,7 +422,8 @@ void TestSearchPagingDone() {
 	CHECK(SearchPagingDone(0, 0, 0));
 	CHECK(SearchPagingDone(0, 50, 200));
 	CHECK(!SearchPagingDone(5, 50, 200));
-	CHECK(SearchPagingDone(5, 200, 200));
+	CHECK(SearchPagingDone(25, 225, 225));
+	CHECK(!SearchPagingDone(kSearchPerPage, 200, 200));
 	CHECK(SearchPagingDone(5, 225, 200));
 	CHECK(!SearchPagingDone(5, 5, 0));
 }
