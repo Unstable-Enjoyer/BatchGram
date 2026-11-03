@@ -330,6 +330,10 @@ std::vector<ListSection> Provider::fillSections(
 		}
 	}
 	section.finishSection();
+	// AyuGram: saved entries without a layout (photos) leave it empty.
+	if (section.empty()) {
+		return {};
+	}
 	return result;
 }
 
