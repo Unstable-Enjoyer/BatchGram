@@ -92,6 +92,7 @@ public:
 	~SearchSelection();
 
 	// Returns false for messages of other chats, they are never selected.
+	// While the download is preparing, the selection is kept as is.
 	bool toggle(not_null<const HistoryItem*> item);
 	void selectAll();
 	// Stops "Select all" (keeping what it found) or the download preparing.

@@ -14,6 +14,7 @@
 #include "ui/effects/numbers_animation.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/continuous_sliders.h"
+#include "ui/wrap/fade_wrap.h"
 #include "ui/qt_object_factory.h"
 #include "ui/rp_widget.h"
 #include "window/window_session_controller.h"
@@ -40,53 +41,88 @@ void ShowSelectionBar(
 		not_null<Window::SessionController*> controller,
 		not_null<SearchSelection*> selection) {
 	const auto owner = selection->lifetime().make_state<
-		base::unique_qptr<Ui::RpWidget>>(
-			base::make_unique_q<Ui::RpWidget>(parent.get()));
-	const auto bar = owner->get();
+		base::unique_qptr<Ui::FadeWrap<Ui::RpWidget>>>(
+			base::make_unique_q<Ui::FadeWrap<Ui::RpWidget>>(
+				parent.get(),
+				object_ptr<Ui::RpWidget>(parent.get())));
+	const auto outer = owner->get();
+	outer->setDuration(st::infoTopBarDuration);
+	const auto bar = outer->entity();
 	const auto &st = st::infoTopBar;
 
 	// Same controls as Info::TopBar::createSelectionControls().
-	const auto cancel = Ui::CreateChild<Ui::IconButton>(
+	const auto wrap = [&](auto created) {
+		created->setDuration(st::infoTopBarDuration);
+		return created;
+	};
+	const auto cancel = wrap(Ui::CreateChild<Ui::FadeWrap<Ui::IconButton>>(
 		bar,
-		st.mediaCancel);
-	cancel->setAccessibleName(tr::lng_context_clear_selection(tr::now));
-	const auto label = Ui::CreateChild<Ui::LabelWithNumbers>(
-		bar,
-		st.title,
-		st.titlePosition.y(),
-		SelectedText(0));
-	label->resize(0, st.height);
-	const auto selectAll = Ui::CreateChild<Ui::IconButton>(
-		bar,
-		st::ayuSearchSelectAll);
-	selectAll->setAccessibleName(tr::lng_mac_menu_select_all(tr::now));
-	const auto download = Ui::CreateChild<Ui::IconButton>(
-		bar,
-		st::ayuSearchSelectDownload);
-	download->setAccessibleName(tr::lng_media_download(tr::now));
+		object_ptr<Ui::IconButton>(bar, st.mediaCancel),
+		st::infoTopBarScale));
+	cancel->entity()->setAccessibleName(
+		tr::lng_context_clear_selection(tr::now));
+	const auto label = wrap(
+		Ui::CreateChild<Ui::FadeWrap<Ui::LabelWithNumbers>>(
+			bar,
+			object_ptr<Ui::LabelWithNumbers>(
+				bar,
+				st.title,
+				st.titlePosition.y(),
+				SelectedText(0)),
+			st::infoTopBarScale));
+	label->entity()->resize(0, st.height);
+	const auto selectAll = wrap(
+		Ui::CreateChild<Ui::FadeWrap<Ui::IconButton>>(
+			bar,
+			object_ptr<Ui::IconButton>(bar, st::ayuSearchSelectAll),
+			st::infoTopBarScale));
+	const auto download = wrap(
+		Ui::CreateChild<Ui::FadeWrap<Ui::IconButton>>(
+			bar,
+			object_ptr<Ui::IconButton>(bar, st::ayuSearchSelectDownload),
+			st::infoTopBarScale));
+	download->entity()->setAccessibleName(tr::lng_media_download(tr::now));
 
 	// Same progress line as the Export top bar.
-	const auto progress = Ui::CreateChild<Ui::FilledSlider>(
-		bar,
-		st::mediaPlayerPlayback);
+	const auto progress = wrap(
+		Ui::CreateChild<Ui::FadeWrap<Ui::FilledSlider>>(
+			bar,
+			object_ptr<Ui::FilledSlider>(bar, st::mediaPlayerPlayback)));
 	progress->setAttribute(Qt::WA_TransparentForMouseEvents);
+	progress->entity()->setAttribute(Qt::WA_TransparentForMouseEvents);
 
-	const auto loading = bar->lifetime().make_state<bool>(false);
+	struct Flags {
+		bool loading = false;
+		bool preparing = false;
+		bool shown = false;
+	};
+	const auto flags = bar->lifetime().make_state<Flags>();
 	selection->stateValue(
 	) | rpl::on_next([=](const SearchSelection::State &state) {
-		*loading = state.loading;
-		label->setValue(SelectedText(state.count));
-		download->setVisible(state.count > 0);
-		progress->setVisible(state.loading || state.preparing);
-		progress->setValue(state.progress);
+		const auto animated = flags->shown
+			? anim::type::normal
+			: anim::type::instant;
+		flags->loading = state.loading;
+		flags->preparing = state.preparing;
+		label->entity()->setValue(SelectedText(state.count));
+		download->toggle(state.count > 0, animated);
+		progress->toggle(state.loading || state.preparing, animated);
+		progress->entity()->setValue(state.progress);
+		selectAll->entity()->setIconOverride(
+			state.loading ? &st.mediaCancel.icon : nullptr,
+			state.loading ? &st.mediaCancel.iconOver : nullptr);
+		selectAll->entity()->setAccessibleName(state.loading
+			? tr::lng_cancel(tr::now)
+			: tr::lng_mac_menu_select_all(tr::now));
 	}, bar->lifetime());
 
 	rpl::combine(
 		parent->sizeValue(),
-		label->naturalWidthValue()
+		label->entity()->naturalWidthValue()
 	) | rpl::on_next([=](QSize size, int) {
 		const auto width = size.width();
-		bar->setGeometry(QRect(QPoint(), size));
+		bar->resize(size);
+		outer->moveToLeft(0, 0);
 		auto right = st.mediaActionsSkip;
 		download->moveToRight(right, 0, width);
 		right += download->width();
@@ -97,7 +133,8 @@ void ShowSelectionBar(
 		label->resizeToNaturalWidth(std::max(width - left - right, 0));
 		label->moveToLeft(left, 0, width);
 		const auto line = st::mediaPlayerPlayback.fullWidth;
-		progress->setGeometry(0, size.height() - line, width, line);
+		progress->entity()->resize(width, line);
+		progress->moveToLeft(0, size.height() - line, width);
 	}, bar->lifetime());
 
 	bar->paintRequest(
@@ -105,17 +142,20 @@ void ShowSelectionBar(
 		QPainter(bar).fillRect(clip, st.bg);
 	}, bar->lifetime());
 
-	cancel->setClickedCallback([=] {
+	cancel->entity()->setClickedCallback([=] {
 		selection->close();
 	});
-	selectAll->setClickedCallback([=] {
-		if (*loading) {
+	selectAll->entity()->setClickedCallback([=] {
+		if (flags->loading) {
 			selection->stop();
 		} else {
 			selection->selectAll();
 		}
 	});
-	download->setClickedCallback([=] {
+	download->entity()->setClickedCallback([=] {
+		if (flags->preparing) {
+			return;
+		}
 		const auto started = crl::guard(selection, [=] {
 			selection->close();
 		});
@@ -124,8 +164,10 @@ void ShowSelectionBar(
 		}));
 	});
 
-	bar->show();
-	bar->raise();
+	flags->shown = true;
+	outer->raise();
+	outer->hide(anim::type::instant);
+	outer->show(anim::type::normal);
 }
 
 } // namespace AyuBulkDownload

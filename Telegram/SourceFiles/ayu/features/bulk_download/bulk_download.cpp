@@ -342,6 +342,8 @@ SearchSelection::~SearchSelection() = default;
 bool SearchSelection::toggle(not_null<const HistoryItem*> item) {
 	if (item->history()->peer != _channel) {
 		return false;
+	} else if (_ready) {
+		return true;
 	}
 	_selection.toggle({
 		.msgId = item->id.bare,
@@ -353,6 +355,9 @@ bool SearchSelection::toggle(not_null<const HistoryItem*> item) {
 }
 
 void SearchSelection::selectAll() {
+	if (_ready) {
+		return;
+	}
 	_selection.forgetUnticked();
 	for (const auto &item : _shownResults()) {
 		if (item->history()->peer == _channel
@@ -366,7 +371,7 @@ void SearchSelection::selectAll() {
 	for (const auto &post : _found) {
 		_selection.addFound(post);
 	}
-	if (!_foundAll && !_loading && !_ready) {
+	if (!_foundAll && !_loading) {
 		LOG(("AyuGram bulk: select all started"));
 		_found.clear();
 		_offsetId = 0;
