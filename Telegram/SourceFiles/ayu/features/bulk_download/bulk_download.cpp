@@ -372,6 +372,7 @@ not_null<VideoSearch*> VideoSearch::Start(
 		includePhotos);
 	const auto result = data.search.get();
 	Changes().fire_copy(session);
+	LOG(("AyuGram bulk: search started"));
 	result->requestPage();
 	return result;
 }
@@ -413,7 +414,8 @@ void VideoSearch::requestPage() {
 		MTP_long(0) // hash
 	)).done([=](const MTPmessages_Messages &result) {
 		pageReceived(result);
-	}).fail([=] {
+	}).fail([=](const MTP::Error &error) {
+		LOG(("AyuGram bulk: search page failed: %1").arg(error.type()));
 		pageFailed();
 	}).send();
 }
@@ -457,23 +459,32 @@ void VideoSearch::pageReceived(const MTPmessages_Messages &result) {
 	progress.total = std::max(progress.total, TotalFrom(result));
 	_progress = progress;
 	updateProgress();
+	LOG(("AyuGram bulk: page received: %1 received, %2 scanned, %3 total"
+		).arg(received
+		).arg(progress.scanned
+		).arg(progress.total));
 
 	const auto complete = !list
 		|| (result.type() == mtpc_messages_messages)
-		|| !received
+		|| SearchPagingDone(received, progress.scanned, progress.total)
 		|| (_offsetId && minId >= _offsetId);
 	if (!complete) {
 		_offsetId = minId;
 		requestPage();
 		return;
 	}
+	LOG(("AyuGram bulk: paging done"));
 	requestAlbums();
 }
 
 void VideoSearch::requestAlbums() {
-	_chunks = ChunkIds(AlbumNeighborIds(albums(), [&](int64 id) {
+	const auto neighbors = AlbumNeighborIds(albums(), [&](int64 id) {
 		return lookup(id) != nullptr;
-	}));
+	});
+	_chunks = ChunkIds(neighbors);
+	LOG(("AyuGram bulk: album phase: %1 ids, %2 chunks"
+		).arg(int(neighbors.size())
+		).arg(int(_chunks.size())));
 	_chunkIndex = 0;
 	requestNextChunk();
 }
@@ -483,18 +494,21 @@ void VideoSearch::requestNextChunk() {
 		finish();
 		return;
 	}
+	const auto index = _chunkIndex++;
 	auto ids = QVector<MTPInputMessage>();
-	for (const auto id : _chunks[_chunkIndex++]) {
+	for (const auto id : _chunks[index]) {
 		ids.push_back(MTP_inputMessageID(MTP_int(id)));
 	}
 	_api.request(MTPchannels_GetMessages(
 		_channel->inputChannel(),
 		MTP_vector<MTPInputMessage>(ids)
 	)).done([=](const MTPmessages_Messages &result) {
+		LOG(("AyuGram bulk: chunk %1 received").arg(index));
 		_channel->owner().processExistingMessages(_channel, result);
 		updateProgress();
 		requestNextChunk();
 	}).fail([=] {
+		LOG(("AyuGram bulk: chunk %1 failed").arg(index));
 		// A failed chunk only means fewer album items, keep going.
 		requestNextChunk();
 	}).send();
@@ -576,6 +590,11 @@ void VideoSearch::finish() {
 			}
 		}
 	}
+
+	LOG(("AyuGram bulk: finished: %1 videos, %2 photos, partial: %3"
+		).arg(int(outcome.videos.size())
+		).arg(int(outcome.photos.size())
+		).arg(Logs::b(outcome.partial)));
 
 	const auto session = &_channel->session();
 	ShowDownloadVideosResult(session, std::move(outcome));

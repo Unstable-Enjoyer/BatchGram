@@ -185,4 +185,8 @@ struct SearchProgress {
 // anything was scanned before the failure.
 [[nodiscard]] bool IsPartialResult(bool failed, int scanned);
 
+// Paging stops when a page brings nothing new (received == 0), or when
+// scanned reached the server's total (total > 0 means the server said it).
+[[nodiscard]] bool SearchPagingDone(int received, int scanned, int total);
+
 } // namespace AyuBulkDownload

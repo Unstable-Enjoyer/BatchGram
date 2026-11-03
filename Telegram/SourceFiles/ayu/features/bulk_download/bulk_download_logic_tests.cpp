@@ -418,6 +418,15 @@ void TestIsPartialResult() {
 	CHECK(!IsPartialResult(true, 0));
 }
 
+void TestSearchPagingDone() {
+	CHECK(SearchPagingDone(0, 0, 0));
+	CHECK(SearchPagingDone(0, 50, 200));
+	CHECK(!SearchPagingDone(5, 50, 200));
+	CHECK(SearchPagingDone(5, 200, 200));
+	CHECK(SearchPagingDone(5, 225, 200));
+	CHECK(!SearchPagingDone(5, 5, 0));
+}
+
 } // namespace
 
 int main() {
@@ -453,6 +462,7 @@ int main() {
 	TestResolveDownloadFolder();
 	TestProgressRatioAndTotal();
 	TestIsPartialResult();
+	TestSearchPagingDone();
 
 	if (gFailed) {
 		std::fprintf(stderr, "bulk download logic tests: %d check(s) failed\n", gFailed);
