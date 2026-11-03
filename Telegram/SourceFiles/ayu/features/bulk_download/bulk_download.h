@@ -113,6 +113,8 @@ public:
 	// Stops adding, what is added stays in the Downloads.
 	void cancel();
 
+	[[nodiscard]] const QString &folder() const;
+
 	[[nodiscard]] rpl::producer<State> stateValue() const;
 	[[nodiscard]] rpl::lifetime &lifetime();
 

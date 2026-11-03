@@ -117,9 +117,20 @@ void DestroyBatch(
 	const auto j = ranges::find_if(batches, [&](const auto &owned) {
 		return (owned.get() == batch);
 	});
-	if (j != end(batches)) {
+	if (j == end(batches)) {
+		return;
+	}
+	const auto folder = batch->folder();
+	{
 		auto taken = std::move(*j);
 		batches.erase(j);
+	}
+	// Names of a folder no batch writes to are free to reuse again.
+	const auto used = ranges::any_of(batches, [&](const auto &owned) {
+		return (owned->folder() == folder);
+	});
+	if (!used) {
+		i->second.reservations.erase(folder);
 	}
 }
 
@@ -542,6 +553,10 @@ void DownloadBatch::cancel() {
 	finish();
 }
 
+const QString &DownloadBatch::folder() const {
+	return _folder;
+}
+
 rpl::producer<DownloadBatch::State> DownloadBatch::stateValue() const {
 	return _state.value();
 }
@@ -569,6 +584,10 @@ void DownloadBatch::processNext() {
 	while (!_pending.empty()) {
 		if (added >= kPostsPerSlice
 			|| crl::now() - started >= kSliceDuration) {
+			if (!ids.empty()) {
+				// The request continues the queue when it is done.
+				break;
+			}
 			_scheduled = true;
 			crl::on_main(this, [=] {
 				_scheduled = false;
@@ -710,6 +729,7 @@ void DownloadBatch::checkFinished() {
 	if (!_finished
 		&& !_requestId
 		&& _pending.empty()
+		&& _requested.empty()
 		&& !(_pager && _pager->loading())) {
 		finish();
 	} else {
