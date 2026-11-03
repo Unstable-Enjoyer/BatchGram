@@ -34,8 +34,6 @@ The Windows build is unsigned, so Windows SmartScreen may warn on first run.
 
 ![AyuGram Logo](.github/AyuGram.png) ![AyuChan](.github/AyuChan.png)
 
-[ English  |   [Русский](README-RU.md) ]
-
 ### Features
 
 - Full ghost mode (flexible)
