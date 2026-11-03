@@ -92,6 +92,10 @@ void PostSelection::forgetUnticked() {
 	_unticked.clear();
 }
 
+bool TrackInDownloads(const Candidate &candidate) {
+	return candidate.isVideo && (candidate.documentId != 0);
+}
+
 std::vector<int64> SelectVideos(
 		const std::vector<MatchedPost> &posts,
 		const std::vector<Candidate> &candidates) {

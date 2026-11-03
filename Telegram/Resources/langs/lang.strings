@@ -9191,7 +9191,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "ayu_AboutText1" = "ToS breaking Telegram client based on {api_link}.";
 "ayu_UpdateAyuGram" = "Update AyuGram";
 "ayu_UtilityRestartRequired" = "The app will close in 5 seconds.";
-"ayu_DownloadVideosAndPhotos" = "{videos} and {photos}";
 "ayu_DownloadVideosCount#one" = "{count} video";
 "ayu_DownloadVideosCount#other" = "{count} videos";
 "ayu_DownloadPhotosCount#one" = "{count} photo";
@@ -9202,9 +9201,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "ayu_DownloadSelectedConfirm" = "Download videos from the selected posts?";
 "ayu_DownloadPostsConfirm#one" = "Download videos from {count} selected post?";
 "ayu_DownloadPostsConfirm#other" = "Download videos from {count} selected posts?";
-"ayu_DownloadAddedFiles#one" = "Added {count} file to Downloads";
-"ayu_DownloadAddedFiles#other" = "Added {count} files to Downloads";
-"ayu_DownloadAdded" = "Added {items} to Downloads.";
+"ayu_DownloadAddedVideos#one" = "Added {count} video to Downloads";
+"ayu_DownloadAddedVideos#other" = "Added {count} videos to Downloads";
+"ayu_DownloadAdded" = "Added {videos} to Downloads.";
+"ayu_DownloadPhotosSaved" = "Saved {photos} to the folder.";
 "ayu_DownloadFailedPosts#one" = "{count} post couldn't be loaded.";
 "ayu_DownloadFailedPosts#other" = "{count} posts couldn't be loaded.";
 "ayu_DownloadSomeFailed" = "Some posts couldn't be loaded.";

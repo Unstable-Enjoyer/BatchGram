@@ -89,6 +89,10 @@ struct Candidate {
 	const std::vector<MatchedPost> &posts,
 	const std::vector<Candidate> &candidates);
 
+// Only video documents go to the Downloads manager: its list shows
+// documents only, and a photo entry breaks the Downloads section.
+[[nodiscard]] bool TrackInDownloads(const Candidate &candidate);
+
 struct PhotoPick {
 	int64 msgId = 0; // The photo message.
 	int64 videoMsgId = 0; // First selected video of the same post.

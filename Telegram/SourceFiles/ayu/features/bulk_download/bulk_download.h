@@ -86,7 +86,7 @@ private:
 class DownloadBatch final : public base::has_weak_ptr {
 public:
 	struct State {
-		int added = 0; // Videos and photos sent to the Downloads.
+		int added = 0; // Videos sent to the Downloads.
 		float64 progress = 0.;
 
 		friend inline bool operator==(const State &, const State &)

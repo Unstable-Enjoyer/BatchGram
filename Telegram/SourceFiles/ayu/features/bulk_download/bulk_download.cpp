@@ -43,7 +43,7 @@ constexpr auto kPostsPerSlice = 50;
 constexpr auto kSliceDuration = crl::time(8);
 
 // Photos load into memory first (as in upstream "Save selected files"),
-// then are written to their reserved path and added to the Downloads.
+// then are written to their reserved path. See TrackInDownloads().
 class PhotoSaver final {
 public:
 	explicit PhotoSaver(not_null<Main::Session*> session);
@@ -55,7 +55,6 @@ public:
 
 private:
 	struct Pending {
-		FullMsgId itemId;
 		not_null<PhotoData*> photo;
 		std::shared_ptr<Data::PhotoMedia> view;
 		QString path;
@@ -221,7 +220,8 @@ QString SaveVideoAndTrack(
 		FullMsgId itemId,
 		not_null<DocumentData*> document,
 		const QString &folder,
-		NameReservation &reservation) {
+		NameReservation &reservation,
+		bool track) {
 	if (document->isNull() || document->forbidsFileSave()) {
 		return QString();
 	}
@@ -230,7 +230,9 @@ QString SaveVideoAndTrack(
 		return QString();
 	}
 	document->save(Data::FileOrigin(itemId), path);
-	if (document->loading() && !document->loadingFilePath().isEmpty()) {
+	if (track
+		&& document->loading()
+		&& !document->loadingFilePath().isEmpty()) {
 		if (const auto item = document->owner().message(itemId)) {
 			Core::App().downloadManager().addLoading({
 				.item = item,
@@ -252,7 +254,6 @@ void PhotoSaver::add(
 	auto view = photo->createMediaView();
 	view->wanted(Data::PhotoSize::Large, Data::FileOrigin(itemId));
 	_pending.push_back({
-		.itemId = itemId,
 		.photo = photo,
 		.view = std::move(view),
 		.path = path,
@@ -270,16 +271,8 @@ bool PhotoSaver::done(const Pending &pending) const {
 	if (!pending.view->loaded()) {
 		// Still loading, or failed to load: drop it when it failed.
 		return pending.photo->failed(Data::PhotoSize::Large);
-	} else if (!pending.view->saveToFile(pending.path)) {
-		return true;
 	}
-	if (const auto item = _session->data().message(pending.itemId)) {
-		auto &manager = Core::App().downloadManager();
-		manager.addLoaded({
-			.item = item,
-			.photo = pending.photo,
-		}, pending.path, manager.computeNextStartDate());
-	}
+	pending.view->saveToFile(pending.path);
 	return true;
 }
 
@@ -312,19 +305,16 @@ void PhotoSaver::check() {
 		bool includePhotos,
 		int failedPosts,
 		bool pageFailed) {
-	const auto countVideos = tr::ayu_DownloadVideosCount(
+	auto result = tr::ayu_DownloadAdded(
 		tr::now,
-		lt_count_decimal,
-		videos);
-	const auto items = includePhotos
-		? tr::ayu_DownloadVideosAndPhotos(
+		lt_videos,
+		tr::ayu_DownloadVideosCount(tr::now, lt_count_decimal, videos));
+	if (includePhotos) {
+		result += ' ' + tr::ayu_DownloadPhotosSaved(
 			tr::now,
-			lt_videos,
-			countVideos,
 			lt_photos,
-			tr::ayu_DownloadPhotosCount(tr::now, lt_count_decimal, photos))
-		: countVideos;
-	auto result = tr::ayu_DownloadAdded(tr::now, lt_items, items);
+			tr::ayu_DownloadPhotosCount(tr::now, lt_count_decimal, photos));
+	}
 	if (failedPosts > 0) {
 		result += ' ' + tr::ayu_DownloadFailedPosts(
 			tr::now,
@@ -693,11 +683,13 @@ bool DownloadBatch::addPost(MatchedPost post) {
 		if (!video || video->loading()) {
 			continue;
 		}
+		const auto candidate = ranges::find(candidates, id, &Candidate::msgId);
 		const auto path = SaveVideoAndTrack(
 			FullMsgId(peerId, MsgId(id)),
 			video,
 			_folder,
-			*_reservation);
+			*_reservation,
+			(candidate != end(candidates)) && TrackInDownloads(*candidate));
 		if (!path.isEmpty()) {
 			videoPaths.emplace(id, path);
 			++_videos;
@@ -764,7 +756,7 @@ void DownloadBatch::pushState() {
 		? std::max(_pager->progress().total - _pager->progress().scanned, 0)
 		: 0;
 	_state = State{
-		.added = _videos + _photos,
+		.added = _videos,
 		.progress = _finished
 			? 1.
 			: ProgressRatio({

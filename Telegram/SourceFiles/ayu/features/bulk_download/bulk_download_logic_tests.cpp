@@ -199,6 +199,12 @@ void TestSelectMediaPhotoWithoutSelectableVideo() {
 	CHECK(media.photos.empty());
 }
 
+void TestTrackInDownloads() {
+	CHECK(TrackInDownloads({ .msgId = 1, .documentId = 5, .isVideo = true }));
+	CHECK(!TrackInDownloads({ .msgId = 2, .photoId = 7 }));
+	CHECK(!TrackInDownloads({ .msgId = 3, .documentId = 6 }));
+}
+
 void TestSplitPath() {
 	const auto withExt = SplitPath(QStringLiteral("C:/d/Episode 12.mp4"));
 	CHECK(withExt.base == QStringLiteral("C:/d/Episode 12"));
@@ -338,6 +344,7 @@ int main() {
 	TestSelectMediaPairsPhotoWithVideo();
 	TestSelectMediaPairsPhotoWithFirstVideo();
 	TestSelectMediaPhotoWithoutSelectableVideo();
+	TestTrackInDownloads();
 	TestSplitPath();
 	TestPhotoPathForVideo();
 	TestReserveNameBumpsSameName();

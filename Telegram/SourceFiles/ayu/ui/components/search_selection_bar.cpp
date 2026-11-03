@@ -35,7 +35,7 @@ namespace {
 }
 
 [[nodiscard]] Ui::StringWithNumbers AddedText(int count) {
-	return tr::ayu_DownloadAddedFiles(
+	return tr::ayu_DownloadAddedVideos(
 		tr::now,
 		lt_count,
 		count,
