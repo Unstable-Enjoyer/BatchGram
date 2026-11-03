@@ -77,6 +77,10 @@ struct PaintContext;
 struct TopicJumpCache;
 } // namespace Dialogs::Ui
 
+namespace AyuBulkDownload {
+class SearchSelection;
+} // namespace AyuBulkDownload
+
 namespace Dialogs {
 
 class Row;
@@ -238,6 +242,10 @@ public:
 	}
 
 	[[nodiscard]] rpl::producer<UserId> openBotMainAppRequests() const;
+
+	// AyuGram: selection of found channel posts, to download their videos.
+	[[nodiscard]] auto ayuSearchSelectionChanges() const
+		-> rpl::producer<not_null<AyuBulkDownload::SearchSelection*>>;
 
 	void setSwipeContextData(
 		int64 key,
@@ -825,6 +833,12 @@ private:
 
 	bool _searchLoading = false;
 	bool _searchWaiting = false;
+
+	// AyuGram: selection of found channel posts, to download their videos.
+	void ayuFillSearchResultMenu(FullMsgId itemId);
+	std::unique_ptr<AyuBulkDownload::SearchSelection> _ayuSearchSelection;
+	rpl::event_stream<not_null<AyuBulkDownload::SearchSelection*>>
+		_ayuSearchSelectionChanges;
 
 	base::unique_qptr<Ui::PopupMenu> _menu;
 

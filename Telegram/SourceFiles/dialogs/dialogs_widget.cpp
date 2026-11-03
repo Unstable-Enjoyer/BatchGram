@@ -110,6 +110,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 // AyuGram includes
 #include "ayu/ayu_settings.h"
+#include "ayu/ui/components/search_selection_bar.h"
 #include "ayu/utils/telegram_helpers.h"
 #include "base/platform/base_platform_haptic.h"
 
@@ -658,6 +659,15 @@ Widget::Widget(
 		if (const auto user = session().data().user(userId)) {
 			openBotMainApp(user);
 		}
+	}, lifetime());
+	// AyuGram: the selection bar of found posts covers the search controls.
+	_inner->ayuSearchSelectionChanges(
+	) | rpl::on_next([=](
+			not_null<AyuBulkDownload::SearchSelection*> selection) {
+		AyuBulkDownload::ShowSelectionBar(
+			_searchControls.data(),
+			controller,
+			selection);
 	}, lifetime());
 
 	_scroll->geometryChanged(

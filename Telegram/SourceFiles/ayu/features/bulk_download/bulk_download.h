@@ -14,6 +14,7 @@
 
 class ChannelData;
 class HistoryItem;
+class QPainter;
 
 namespace Main {
 class Session;
@@ -90,7 +91,6 @@ public:
 		Fn<void()> repaint);
 	~SearchSelection();
 
-	[[nodiscard]] bool contains(not_null<const HistoryItem*> item) const;
 	// Returns false for messages of other chats, they are never selected.
 	bool toggle(not_null<const HistoryItem*> item);
 	void selectAll();

@@ -211,6 +211,8 @@ set(ayugram_files
         ayu/ui/components/message_preview.h
         ayu/ui/components/saved_music.cpp
         ayu/ui/components/saved_music.h
+        ayu/ui/components/search_selection_bar.cpp
+        ayu/ui/components/search_selection_bar.h
         ayu/libs/json.hpp
         ayu/libs/json_ext.hpp
         ayu/libs/sqlite/sqlite3.c

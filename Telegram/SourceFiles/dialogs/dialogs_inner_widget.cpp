@@ -103,6 +103,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <unordered_map>
 
 // AyuGram includes
+#include "ayu/features/bulk_download/bulk_download.h"
 #include "ayu/ui/ayu_userpic.h"
 #include "ayu/utils/telegram_helpers.h"
 #include "styles/style_ayu_icons.h"
@@ -1745,6 +1746,13 @@ void InnerWidget::paintEvent(QPaintEvent *e) {
 						.narrow = (fullWidth < st::columnMinimalWidthLeft / 2),
 						.displayUnreadInfo = showUnreadInSearchResults,
 					});
+					if (_ayuSearchSelection) { // AyuGram
+						_ayuSearchSelection->paintCheck(
+							p,
+							result->item(),
+							*_st,
+							fullWidth);
+					}
 					p.translate(0, _st->height);
 				}
 			}
@@ -4076,6 +4084,7 @@ void InnerWidget::contextMenuEvent(QContextMenuEvent *e) {
 		if (session().supportMode()) {
 			fillSupportSearchMenu(_menu.get());
 		}
+		ayuFillSearchResultMenu(row.fullId); // AyuGram
 	} else {
 		const auto addAction = Ui::Menu::CreateAddActionCallback(_menu);
 		Window::FillDialogsEntryMenu(
@@ -4280,6 +4289,7 @@ void InnerWidget::applySearchState(SearchState state) {
 	if (_searchState == state) {
 		return;
 	}
+	_ayuSearchSelection = nullptr; // AyuGram
 	auto withSameQuery = state;
 	withSameQuery.query = _searchState.query;
 	const auto otherChanged = (_searchState != withSameQuery);
@@ -5973,6 +5983,13 @@ bool InnerWidget::chooseRow(
 		return row;
 	};
 	auto chosen = modifyChosenRow(computeChosenRow(), modifiers);
+	// AyuGram: while selecting found posts, a click toggles them.
+	if (_ayuSearchSelection && chosen.message.fullId) {
+		const auto item = session().data().message(chosen.message.fullId);
+		if (item && _ayuSearchSelection->toggle(item)) {
+			return true;
+		}
+	}
 	if (chosen.key) {
 		if (IsServerMsgId(chosen.message.fullId.msg)) {
 			session().local().saveRecentSearchHashtags(_filter);
@@ -6518,6 +6535,47 @@ bool InnerWidget::jumpToDialogRow(RowDescriptor to) {
 
 rpl::producer<UserId> InnerWidget::openBotMainAppRequests() const {
 	return _openBotMainAppRequests.events();
+}
+
+auto InnerWidget::ayuSearchSelectionChanges() const
+-> rpl::producer<not_null<AyuBulkDownload::SearchSelection*>> {
+	return _ayuSearchSelectionChanges.events();
+}
+
+void InnerWidget::ayuFillSearchResultMenu(FullMsgId itemId) {
+	const auto channel = AyuBulkDownload::SelectableSearchChannel(
+		_searchState);
+	if (_ayuSearchSelection || !channel || itemId.peer != channel->id) {
+		return;
+	}
+	_menu->addAction(tr::lng_context_select_msg(tr::now), [=] {
+		const auto item = session().data().message(itemId);
+		if (!item || _ayuSearchSelection) {
+			return;
+		}
+		auto selection = std::make_unique<AyuBulkDownload::SearchSelection>(
+			channel,
+			_searchState.query.trimmed(),
+			[=] {
+				return ranges::views::all(
+					_searchResults
+				) | ranges::views::transform([](const auto &row) {
+					return row->item();
+				}) | ranges::to_vector;
+			},
+			[=] { update(); });
+		const auto raw = selection.get();
+		raw->closeRequests(
+		) | rpl::on_next([=] {
+			crl::on_main(raw, [=] {
+				_ayuSearchSelection = nullptr;
+				update();
+			});
+		}, raw->lifetime());
+		raw->toggle(item);
+		_ayuSearchSelection = std::move(selection);
+		_ayuSearchSelectionChanges.fire(raw);
+	});
 }
 
 void InnerWidget::setSwipeContextData(

@@ -124,3 +124,12 @@ ayuServiceTimeBadgeVerticalPadding: 2px;
 ayuServiceTimeBadgeGap: 8px;
 ayuServiceTimeBadgeTrailingInset: 3px;
 ayuServiceTimeBadgeLastLineWidthAdd: 9px;
+
+ayuSearchSelectAll: IconButton(infoTopBarForward) {
+	icon: icon {{ "menu/select", boxTitleCloseFg }};
+	iconOver: icon {{ "menu/select", boxTitleCloseFgOver }};
+}
+ayuSearchSelectDownload: IconButton(infoTopBarForward) {
+	icon: icon {{ "menu/download", boxTitleCloseFg }};
+	iconOver: icon {{ "menu/download", boxTitleCloseFgOver }};
+}

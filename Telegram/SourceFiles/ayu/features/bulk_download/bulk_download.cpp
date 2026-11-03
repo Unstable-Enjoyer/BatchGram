@@ -339,11 +339,6 @@ SearchSelection::SearchSelection(
 
 SearchSelection::~SearchSelection() = default;
 
-bool SearchSelection::contains(not_null<const HistoryItem*> item) const {
-	return (item->history()->peer == _channel)
-		&& _selection.contains(item->id.bare);
-}
-
 bool SearchSelection::toggle(not_null<const HistoryItem*> item) {
 	if (item->history()->peer != _channel) {
 		return false;
